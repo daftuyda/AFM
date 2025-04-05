@@ -1,5 +1,4 @@
 # AFM
- Anime Fantasy Macro
 
 ## What is this
  A automatic endless macro for the Roblox game Anime Fantasy Kingdom.
