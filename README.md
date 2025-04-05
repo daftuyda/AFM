@@ -24,7 +24,7 @@
  Then it will reset and start a new endless run automatically.
 
 ### TL;DR
- It using CV to scan for upgrades.
+ It uses CV to scan for upgrades.
  Calculates logic on the best upgrade.
  Then navigates to them using roblox in-game navigation
 
@@ -32,3 +32,14 @@
  This is currently only tested on 1080p and will probably mess up on anything else.
  Which also includes the window not being in fullscreen.
  The Roblox window also needs to be on the primary display.
+
+# Upgrade Logic
+ (REGEN > BOSS > DISCOUNT > ATK% > HEALTH% > SUMMON) > LUCK% > SPEED% > HEALING% > JADE
+ It will always pick the higher rarity choice of the upgrades in the brackets.
+ 
+ Skips:
+ - 3 Epic Units
+ - Flat Health Increases
+ - Flat ATK Increases
+
+ If everything is a skipped upgrade or it can't find upgrades it will default to the 1st option.
