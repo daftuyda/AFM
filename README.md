@@ -35,6 +35,7 @@
 
 # Upgrade Logic
  (REGEN > BOSS > DISCOUNT > ATK% > HEALTH% > SUMMON) > LUCK% > SPEED% > HEALING% > JADE
+
  It will always pick the higher rarity choice of the upgrades in the brackets.
  
  Skips:
