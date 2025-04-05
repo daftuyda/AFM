@@ -10,35 +10,11 @@ import os
 import json
 import platform
 import ctypes
+import logging
+from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
-
-# Configuration
-UPGRADE_PRIORITY = [
-    "regen.png",
-    "boss.png",
-    "discount.png",
-    "atk.png",
-    "health.png",
-    "units.png",
-    "luck.png",
-    "speed.png",
-    "heal.png",
-    "jade.png",
-    "enemy.png"
-]
-
-RARITY_COLORS = {
-    (71, 99, 189): "Common",     # Blue
-    (190, 60, 238): "Epic",      # Purple
-    (238, 208, 60): "Legendary", # Yellow
-    (238, 60, 60): "Mythic"      # Red
-}
-
-RARITY_ORDER = ["Unknown", "Common", "Epic", "Legendary", "Mythic"]
-
-VICTORY_TEMPLATE = "victory.png"
 
 DEFAULT_CONFIG = {
     "scan_interval": 5,
@@ -70,6 +46,7 @@ STOP_KEY = config.get("stop_key", "f8")
 DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
 
+IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.8
 UI_TOGGLE_KEY = '\\'
 
@@ -80,6 +57,32 @@ victory_detected = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
+
+IMAGE_FOLDER = "images"
+UPGRADE_PRIORITY = [
+    "regen.png",
+    "boss.png",
+    "discount.png",
+    "atk.png",
+    "health.png",
+    "units.png",
+    "luck.png",
+    "speed.png",
+    "heal.png",
+    "jade.png",
+    "enemy.png"
+]
+
+VICTORY_TEMPLATE = "victory.png"
+
+RARITY_COLORS = {
+    (71, 99, 189): "Common",     # Blue
+    (190, 60, 238): "Epic",      # Purple
+    (238, 208, 60): "Legendary", # Yellow
+    (238, 60, 60): "Mythic"      # Red
+}
+
+RARITY_ORDER = ["Unknown", "Common", "Epic", "Legendary", "Mythic"]
 
 if platform.system() == "Windows":
 
@@ -102,9 +105,43 @@ else:
     def allow_sleep():
         pass
 
-def log(message):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}")
+def setup_logging():
+    # Clear previous log file on startup
+    with open('afm_macro.log', 'w'):
+        pass
+    
+    # Create logger
+    logger = logging.getLogger('AFM')
+    logger.setLevel(logging.DEBUG)
+    
+    # File handler (rotates when reaches 1MB)
+    file_handler = RotatingFileHandler(
+        'afm_macro.log', 
+        maxBytes=1024*1024, 
+        backupCount=3,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(
+        '[%(asctime)s] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S'
+    ))
+    
+    # Console handler (for real-time output)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(
+        '[%(asctime)s] %(message)s',
+        datefmt='%H:%M:%S'
+    ))
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger
+
+log = setup_logging()
+
+def get_template_path(filename):
+    """Helper function to get correct template path"""
+    return os.path.join(IMAGE_FOLDER, filename) if IMAGE_FOLDER else filename
 
 def focus_roblox_window():
     try:
@@ -116,10 +153,10 @@ def focus_roblox_window():
                 time.sleep(0.2)
             return window
         if DEBUG:
-            log("Roblox window not found")
+            log.warning("Roblox window not found")
     except Exception as e:
         if DEBUG:
-            log(f"Window focus error: {str(e)}")
+            log.error(f"Window focus error: {str(e)}")
     return None
 
 def get_rarity_from_color(image, position):
@@ -151,7 +188,7 @@ def get_rarity_from_color(image, position):
         rgb_color = (r, g, b)
         
         if DEBUG:
-            print(f"Position {position} | Scanned at X={scan_x} | Color: {rgb_color}")
+            log.debug(f"Position {position} | Scanned at X={scan_x} | Color: {rgb_color}")
             # debug_img = image.copy()
             # cv2.rectangle(
             #     debug_img,
@@ -177,14 +214,14 @@ def get_rarity_from_color(image, position):
         return closest_match if min_distance < 50 else "Unknown"
         
     except Exception as e:
-        log(f"Rarity detection error: {str(e)}")
+        log.error(f"Rarity detection error: {str(e)}")
         return "Unknown"
 
 def record_upgrade_purchase(upgrade_name, rarity):
     global upgrades_purchased
     upgrades_purchased[upgrade_name.replace('.png', '')][rarity] += 1
     if DEBUG:
-        log(f"Recorded purchase: {upgrade_name} ({rarity})")
+        log.debug(f"Recorded purchase: {upgrade_name} ({rarity})")
 
 def generate_upgrade_summary():
     """Generate a formatted summary of upgrades purchased this run with custom header and static column widths."""
@@ -281,24 +318,29 @@ def scan_for_upgrades(max_attempts=3):
                     # if DEBUG:
                     #     debug_filename = f"debug_position_{position}.png"
                     #     cv2.imwrite(debug_filename, screenshot)
-                    #     log(f"Saved debug screenshot for position {position} as {debug_filename}")
+                    #     log.debug(f"Saved debug screenshot for position {position} as {debug_filename}")
                     
                     for upgrade in UPGRADE_PRIORITY:
-                        template = cv2.imread(upgrade)
+                        template_path = get_template_path(upgrade)
+                        template = cv2.imread(template_path)
                         if template is None:
+                            if DEBUG:
+                                log.warning(f"Template not found: {template_path}")
                             continue
                             
                         res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
                         _, confidence, _, _ = cv2.minMaxLoc(res)
 
                         if confidence >= CONFIDENCE_THRESHOLD:
-                            upgrade_name = upgrade
+                            upgrade_name = os.path.basename(upgrade)
                             is_percent = False
                             
-                            if upgrade in ["health.png", "atk.png"]:
+                            if upgrade_name in ["atk.png", "health.png"]:
+                                if DEBUG:
+                                    log.debug(f"Running percent check for {upgrade_name} at pos {position}")
                                 is_percent = is_percent_upgrade(screenshot, position)
-                                if is_percent:
-                                    upgrade_name = upgrade.replace('.png', '_percent.png')
+                                if DEBUG:
+                                    log.debug(f"Percent check result: {is_percent}")
                             
                             rarity = get_rarity_from_color(screenshot, position)
                             found_upgrades.append({
@@ -307,14 +349,14 @@ def scan_for_upgrades(max_attempts=3):
                                 'rarity': rarity,
                                 'confidence': confidence,
                                 'is_percent': is_percent,
-                                'original_upgrade': upgrade
+                                'original_upgrade': upgrade_name
                             })
                             detected_positions.add(position)
                             break
                             
                 except Exception as e:
                     if DEBUG:
-                        log(f"Error scanning position {position}: {str(e)}")
+                        log.error(f"Error scanning position {position}: {str(e)}")
 
             # Only store results if we found more upgrades than last time
             if len(found_upgrades) > len(last_results):
@@ -328,12 +370,12 @@ def scan_for_upgrades(max_attempts=3):
             else:
                 missing = 3 - len(detected_positions)
                 if DEBUG:
-                    log(f"Only detected {len(detected_positions)} upgrades (missing {missing}), retrying...")
+                    log.warning(f"Only detected {len(detected_positions)} upgrades (missing {missing}), retrying...")
                 time.sleep(0.3)  # Short delay before retry
                 attempts += 1
 
         except Exception as e:
-            log(f"Scan error: {str(e)}")
+            log.error(f"Scan error: {str(e)}")
             attempts += 1
             time.sleep(1)
 
@@ -343,9 +385,10 @@ def is_percent_upgrade(screenshot, position):
     """Check if the upgrade has a percent symbol using template matching"""
     try:
         # Load the percent symbol template
-        percent_template = cv2.imread('percent.png')
+        percent_path = os.path.join(IMAGE_FOLDER, 'percent.png')
+        percent_template = cv2.imread(get_template_path("percent.png"))
         if percent_template is None:
-            log("Warning: percent.png template not found")
+            log.error(f"ERROR: Could not load percent template at {percent_path}")
             return False
 
         height, width = screenshot.shape[:2]
@@ -369,28 +412,30 @@ def is_percent_upgrade(screenshot, position):
         
         # Debugging - save images with position info
         # if DEBUG:
-        #     log(f"Saving debug image for position {position}")
-        #     timestamp = int(time.time())
-        #     cv2.imwrite(f'debug_full_card_pos{position}_{timestamp}.png', search_region)
+        #     debug_img = search_region.copy()
+        #     cv2.putText(debug_img, f"Pos {position}", (10, 30), 
+        #                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        #     debug_path = os.path.join("debug_images", f"percent_scan_pos{position}.png")
+        #     cv2.imwrite(debug_path, debug_img)
+        #     log.debug(f"Saved percent scan region to {debug_path}")
         
         # Perform template matching on the full card region
         res = cv2.matchTemplate(search_region, percent_template, cv2.TM_CCOEFF_NORMED)
-        _, max_confidence, _, max_loc = cv2.minMaxLoc(res)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
         
         if DEBUG:
-            log(f"Checking FULL CARD at pos {position} (X{x_start}-{x_end} Y{y_start}-{y_end})")
-            log(f"Max confidence: {max_confidence:.2f} at position {max_loc}")
+            log.debug(f"Percent check - Max confidence: {max_val:.2f} at {max_loc}")
 
-        return max_confidence > CONFIDENCE_THRESHOLD
+        return max_val > 0.7  # Lower threshold slightly
         
     except Exception as e:
-        log(f"Percent check error: {str(e)}")
+        log.error(f"Percent check error: {str(e)}")
         return False
 
 def navigate_to(position_index):
     try:
         if DEBUG:
-            log(f"Attempting to navigate to position {position_index}")
+            log.debug(f"Attempting to navigate to position {position_index}")
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY/2)
@@ -426,12 +471,12 @@ def navigate_to(position_index):
         return True
         
     except Exception as e:
-        log(f"Navigation error: {str(e)}")
+        log.error(f"Navigation error: {str(e)}")
         return False
 
 def select_best_upgrade(upgrades):
     if not upgrades:
-        log("No upgrades detected")
+        log.debug("No upgrades detected")
         return False
 
     # First filter out unwanted upgrades
@@ -440,24 +485,24 @@ def select_best_upgrade(upgrades):
         # Skip Common unit upgrades
         if "unit" in upgrade['upgrade'].lower() and upgrade['rarity'] == "Common":
             if DEBUG:
-                log(f"Skipping Common unit upgrade: {upgrade['upgrade']} at pos {upgrade['position']}")
+                log.debug(f"Skipping Common unit upgrade: {upgrade['upgrade']} at pos {upgrade['position']}")
             continue
             
         # Skip flat ATK/HP upgrades (non-percent)
         if (upgrade['original_upgrade'] in ['atk.png', 'health.png'] and 
             not upgrade.get('is_percent', False)):
             if DEBUG:
-                log(f"Skipping flat {upgrade['original_upgrade']} upgrade at pos {upgrade['position']}")
+                log.debug(f"Skipping flat {upgrade['original_upgrade']} upgrade at pos {upgrade['position']}")
             continue
             
         valid_upgrades.append(upgrade)
     
     # Fail-safe if no valid upgrades
     if not valid_upgrades:
-        log("No valid upgrades after filtering - using fail-safe")
+        log.debug("No valid upgrades after filtering - using fail-safe")
         for upgrade in upgrades:
             if upgrade['position'] == 0:
-                log(f"Fail-safe: Selecting position 0 ({upgrade['upgrade']})")
+                log.debug(f"Fail-safe: Selecting position 0 ({upgrade['upgrade']})")
                 if navigate_to(0):
                     record_upgrade_purchase(upgrade['upgrade'], upgrade['rarity'])
                     return True
@@ -486,24 +531,24 @@ def select_best_upgrade(upgrades):
     valid_upgrades.sort(key=get_sort_key)
 
     if DEBUG:
-        log("Valid upgrades sorted:")
+        log.debug("Valid upgrades sorted:")
         for idx, upgrade in enumerate(valid_upgrades, 1):
             perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
             group = ["TOP", "HIGH", "LOW"][
                 0 if upgrade['original_upgrade'] in ['discount.png', 'boss.png', 'regen.png'] else
                 1 if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 5 else 2
             ]
-            log(f"{idx}. [{group}] {upgrade['upgrade']}{perc} ({upgrade['rarity']}) at pos {upgrade['position']}")
+            log.debug(f"{idx}. [{group}] {upgrade['upgrade']}{perc} ({upgrade['rarity']}) at pos {upgrade['position']}")
 
     # Try to select best upgrade
     for upgrade in valid_upgrades:
         perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
         if DEBUG:
-            log(f"Attempting: {upgrade['upgrade']}{perc} at position {upgrade['position']}")
+            log.debug(f"Attempting: {upgrade['upgrade']}{perc} at position {upgrade['position']}")
         if navigate_to(upgrade['position']):
             record_upgrade_purchase(upgrade['upgrade'], upgrade['rarity'])
-            clean_name = upgrade['upgrade'].replace('.png', '').upper()
-            log(f"Selected upgrade: {clean_name} ({upgrade['rarity']})")
+            clean_name = upgrade['upgrade'].replace('.png', '').replace("IMAGES\\","").upper()
+            log.debug(f"Selected upgrade: {clean_name} ({upgrade['rarity']})")
             return True
 
     return False
@@ -535,14 +580,14 @@ def upload_to_discord(screenshot, run_time):
         
         if response.status_code == 204:
             if DEBUG:
-                log("Screenshot and stats uploaded to Discord successfully")
+                log.debug("Screenshot and stats uploaded to Discord successfully")
             return True
         else:
-            log(f"Discord upload failed: {response.text}")
+            log.error(f"Discord upload failed: {response.text}")
             return False
             
     except Exception as e:
-        log(f"Discord upload error: {str(e)}")
+        log.error(f"Discord upload error: {str(e)}")
         return False
 
 def detect_victory():
@@ -564,7 +609,7 @@ def detect_victory():
         ))
         screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
         
-        template = cv2.imread(VICTORY_TEMPLATE)
+        template = cv2.imread(get_template_path(VICTORY_TEMPLATE))
         if template is None:
             return False
             
@@ -578,14 +623,14 @@ def detect_victory():
                 run_start_time = 0
             
             if DEBUG:
-                log(f"Victory detected! (confidence: {confidence:.2f})")
+                log.debug(f"Victory detected! (confidence: {confidence:.2f})")
             if DISCORD_WEBHOOK_URL:
-                log("Uploading screenshot and stats to Discord...")
+                log.debug("Uploading screenshot and stats to Discord...")
                 if not upload_to_discord(screenshot, run_time):
-                    log("Failed to upload to Discord")
+                    log.error("Failed to upload to Discord")
             else:
                 if DEBUG:
-                    log("Discord webhook URL not set, skipping upload")
+                    log.debug("Discord webhook URL not set, skipping upload")
             
             last_victory_time = current_time
             victory_detected = True
@@ -594,13 +639,13 @@ def detect_victory():
         return False
         
     except Exception as e:
-        log(f"Victory detection error: {str(e)}")
+        log.error(f"Victory detection error: {str(e)}")
         return False
 
 def restart_run():
     global run_start_time, victory_detected, upgrades_purchased
     
-    log("Attempting to restart run")
+    log.debug("Attempting to restart run")
     try:
         time.sleep(0.2)
         pydirectinput.keyDown(UI_TOGGLE_KEY)
@@ -629,14 +674,14 @@ def restart_run():
         return True
         
     except Exception as e:
-        log(f"Run restart error: {str(e)}")
+        log.error(f"Run restart error: {str(e)}")
         return False
 
 def main_loop():
     global run_start_time, victory_detected, is_running, is_paused
     
-    log("=== AFM Endless Macro ===")
-    log(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
+    log.info("=== AFK Endless Macro ===")
+    log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
     
     last_scan = time.time()
     last_victory_check = time.time()
@@ -650,21 +695,21 @@ def main_loop():
     while True:
         # Check for start/pause/stop keys
         if keyboard.is_pressed(STOP_KEY):
-            log("=== Stopped ===")
+            log.info("=== Stopped ===")
             is_running = False
             allow_sleep()
             break
             
         if keyboard.is_pressed(START_KEY):
             if not is_running:
-                log("=== Started ===")
+                log.info("=== Started ===")
                 is_running = True
                 run_start_time = time.time()  # Reset timer on manual start
             time.sleep(0.5)  # Debounce
             
         if keyboard.is_pressed(PAUSE_KEY):
             is_paused = not is_paused
-            log(f"=== {'Paused' if is_paused else 'Resumed'} ===")
+            log.info(f"=== {'Paused' if is_paused else 'Resumed'} ===")
             time.sleep(0.5)  # Debounce
         
         # Only run logic when active and not paused
@@ -688,7 +733,7 @@ def main_loop():
                         last_scan = time.time()
                     else:
                         if DEBUG:
-                            log("No upgrades found, waiting...")
+                            log.debug("No upgrades found, waiting...")
                         last_scan = time.time() + 2
                 else:
                     last_scan = time.time() + 1
