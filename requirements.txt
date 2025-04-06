@@ -5,3 +5,4 @@ pyautogui==0.9.54
 PyDirectInput==1.0.4
 PyGetWindow==0.0.9
 Requests==2.32.3
+Pillow==11.1.0
