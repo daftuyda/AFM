@@ -18,6 +18,9 @@ from collections import defaultdict
 
 DEFAULT_CONFIG = {
     "scan_interval": 5,
+    "start_key": "f6",
+    "pause_key": "f7",
+    "auto_start": False,
     "stop_key": "f8",
     "webhook_url": "",
     "debug": False
