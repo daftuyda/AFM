@@ -11,6 +11,8 @@ import json
 import platform
 import ctypes
 import logging
+import mss
+import mss.tools
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
@@ -20,8 +22,8 @@ DEFAULT_CONFIG = {
     "scan_interval": 5,
     "start_key": "f6",
     "pause_key": "f7",
-    "auto_start": False,
     "stop_key": "f8",
+    "auto_start": False,
     "webhook_url": "",
     "debug": False
 }
@@ -162,6 +164,65 @@ def focus_roblox_window():
             log.error(f"Window focus error: {str(e)}")
     return None
 
+def get_roblox_window():
+    """Get Roblox window dimensions without focusing, with multi-monitor support"""
+    try:
+        roblox_windows = gw.getWindowsWithTitle("Roblox")
+        if not roblox_windows:
+            if DEBUG:
+                log.warning("Roblox window not found")
+            return None
+            
+        window = roblox_windows[0]
+        
+        # Verify window is visible and has reasonable dimensions
+        if window.width < 100 or window.height < 100:
+            if DEBUG:
+                log.warning(f"Window too small: {window.width}x{window.height}")
+            return None
+            
+        return window
+        
+    except Exception as e:
+        if DEBUG:
+            log.error(f"Window detection error: {str(e)}")
+        return None
+
+def get_window_screenshot(window):
+    """Capture window screenshot without focusing using mss, supports any monitor"""
+    with mss.mss() as sct:
+        # Find which monitor the window is on
+        for monitor_num, monitor in enumerate(sct.monitors[1:], 1):
+            if (window.left >= monitor['left'] and 
+                window.top >= monitor['top'] and
+                window.left + window.width <= monitor['left'] + monitor['width'] and
+                window.top + window.height <= monitor['top'] + monitor['height']):
+                
+                # Calculate relative position within the monitor
+                monitor_region = {
+                    'left': window.left - monitor['left'],
+                    'top': window.top - monitor['top'],
+                    'width': window.width,
+                    'height': window.height,
+                    'mon': monitor_num
+                }
+                
+                sct_img = sct.grab(monitor_region)
+                img = np.array(sct_img)
+                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        
+        # Fallback to primary monitor if not found (shouldn't happen)
+        monitor_region = {
+            'left': window.left,
+            'top': window.top,
+            'width': window.width,
+            'height': window.height,
+            'mon': 1
+        }
+        sct_img = sct.grab(monitor_region)
+        img = np.array(sct_img)
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
 def get_rarity_from_color(image, position):
     try:
         height, width = image.shape[:2]
@@ -280,49 +341,53 @@ def scan_for_upgrades(max_attempts=3):
     
     while attempts < max_attempts:
         try:
-            window = focus_roblox_window()
+            window = get_roblox_window()
             if not window:
                 time.sleep(1)
                 attempts += 1
                 continue
+            
+            # Capture the entire window screenshot using mss
+            screenshot = get_window_screenshot(window)
+            if screenshot is None:
+                log.error("Failed to capture window screenshot")
+                attempts += 1
+                continue
 
-            left = window.left
-            top = window.top
-            width = window.width
-            height = window.height
+            window_width = screenshot.shape[1]
+            window_height = screenshot.shape[0]
 
-            # Card dimensions and positioning
-            card_width = 350  # Width of each upgrade card
-            gap = 50         # Space between cards
-            first_card_left = (width // 2) - 575  # Left edge of first card
+            # Card dimensions and positioning relative to window
+            card_width = 350
+            gap = 50
+            first_card_left = (window_width // 2) - 575  # Adjust based on window screenshot width
 
+            # Define regions within the screenshot image
             regions = [
-                (left + first_card_left, top, card_width, height),
-                (left + first_card_left + card_width + gap, top, card_width, height),
-                (left + first_card_left + 2*(card_width + gap), top, card_width, height)
+                (first_card_left, 0, card_width, window_height),
+                (first_card_left + card_width + gap, 0, card_width, window_height),
+                (first_card_left + 2*(card_width + gap), 0, card_width, window_height)
             ]
 
             found_upgrades = []
             detected_positions = set()
 
-            for position, region in enumerate(regions):
+            for position, (x, y, w, h) in enumerate(regions):
                 try:
-                    # Capture with small buffer
-                    buffered_region = (
-                        max(left, region[0] - 5),
-                        region[1],
-                        min(width, region[2] + 10),
-                        region[3]
-                    )
-                    
-                    screenshot = pyautogui.screenshot(region=buffered_region)
-                    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-                    
+                    # Adjust region to stay within screenshot bounds
+                    x = max(0, x)
+                    y = max(0, y)
+                    w = min(w, window_width - x)
+                    h = min(h, window_height - y)
+
+                    # Crop the region from the screenshot
+                    card_image = screenshot[y:y+h, x:x+w]
+
                     # if DEBUG:
                     #     debug_filename = f"debug_position_{position}.png"
-                    #     cv2.imwrite(debug_filename, screenshot)
+                    #     cv2.imwrite(debug_filename, card_image)
                     #     log.debug(f"Saved debug screenshot for position {position} as {debug_filename}")
-                    
+
                     for upgrade in UPGRADE_PRIORITY:
                         template_path = get_template_path(upgrade)
                         template = cv2.imread(template_path)
@@ -330,22 +395,22 @@ def scan_for_upgrades(max_attempts=3):
                             if DEBUG:
                                 log.warning(f"Template not found: {template_path}")
                             continue
-                            
-                        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+
+                        res = cv2.matchTemplate(card_image, template, cv2.TM_CCOEFF_NORMED)
                         _, confidence, _, _ = cv2.minMaxLoc(res)
 
                         if confidence >= CONFIDENCE_THRESHOLD:
                             upgrade_name = os.path.basename(upgrade)
                             is_percent = False
-                            
+
                             if upgrade_name in ["atk.png", "health.png"]:
                                 if DEBUG:
                                     log.debug(f"Running percent check for {upgrade_name} at pos {position}")
-                                is_percent = is_percent_upgrade(screenshot, position)
+                                is_percent = is_percent_upgrade(card_image, position)
                                 if DEBUG:
                                     log.debug(f"Percent check result: {is_percent}")
-                            
-                            rarity = get_rarity_from_color(screenshot, position)
+
+                            rarity = get_rarity_from_color(card_image, position)
                             found_upgrades.append({
                                 'upgrade': upgrade_name,
                                 'position': position,
@@ -356,25 +421,21 @@ def scan_for_upgrades(max_attempts=3):
                             })
                             detected_positions.add(position)
                             break
-                            
+
                 except Exception as e:
                     if DEBUG:
                         log.error(f"Error scanning position {position}: {str(e)}")
 
-            # Only store results if we found more upgrades than last time
-            if len(found_upgrades) > len(last_results):
-                last_results = found_upgrades.copy()
-
-            # Decision logic:
+            # Decision logic remains the same
             if len(detected_positions) == 3:
-                return found_upgrades  # Found all three, return immediately
+                return found_upgrades
             elif attempts == max_attempts - 1:
-                return last_results if last_results else found_upgrades  # Return best we found
+                return last_results if last_results else found_upgrades
             else:
-                missing = 3 - len(detected_positions)
                 if DEBUG:
+                    missing = 3 - len(detected_positions)
                     log.warning(f"Only detected {len(detected_positions)} upgrades (missing {missing}), retrying...")
-                time.sleep(0.3)  # Short delay before retry
+                time.sleep(0.3)
                 attempts += 1
 
         except Exception as e:
@@ -423,7 +484,7 @@ def is_percent_upgrade(screenshot, position):
         #     log.debug(f"Saved percent scan region to {debug_path}")
         
         # Perform template matching on the full card region
-        res = cv2.matchTemplate(search_region, percent_template, cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(screenshot, percent_template, cv2.TM_CCOEFF_NORMED)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
         
         if DEBUG:
@@ -516,7 +577,7 @@ def select_best_upgrade(upgrades):
         # Priority groups (lower number = higher priority)
         if upgrade['original_upgrade'] in ['discount.png', 'boss.png', 'regen.png']:
             group = 0  # Highest priority
-        elif UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 5:
+        elif UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6:
             group = 1  # High priority
         else:
             group = 2  # Low priority
@@ -601,16 +662,14 @@ def detect_victory():
         if current_time - last_victory_time < 30:
             return False
             
-        window = focus_roblox_window()
+        window = get_roblox_window()
         if not window:
             return False
         
         time.sleep(2) # Wait for results to load
-            
-        screenshot = pyautogui.screenshot(region=(
-            window.left, window.top, window.width, window.height
-        ))
-        screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        
+        # Get screenshot from correct monitor
+        screenshot = get_window_screenshot(window)
         
         template = cv2.imread(get_template_path(VICTORY_TEMPLATE))
         if template is None:
@@ -729,11 +788,15 @@ def main_loop():
                 
             # Upgrade scanning
             if current_time - last_scan > SCAN_INTERVAL:
-                if focus_roblox_window():
+                window = get_roblox_window()  # Get window without focusing
+                if window:
                     upgrades = scan_for_upgrades()
                     if upgrades:
-                        select_best_upgrade(upgrades)
-                        last_scan = time.time()
+                        if focus_roblox_window():  # Only focus when we have upgrades to select
+                            select_best_upgrade(upgrades)
+                            last_scan = time.time()
+                        else:
+                            last_scan = time.time() + 2
                     else:
                         if DEBUG:
                             log.debug("No upgrades found, waiting...")
