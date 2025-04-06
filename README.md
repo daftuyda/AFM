@@ -30,7 +30,6 @@
 ## Limitations
  This is currently only tested on 1080p and will probably mess up on anything else.
  Which also includes the window not being in fullscreen.
- The Roblox window also needs to be on the primary display.
 
 # Upgrade Logic
  (REGEN > BOSS > DISCOUNT > ATK% > HEALTH% > SUMMON) > LUCK% > SPEED% > HEALING% > JADE
