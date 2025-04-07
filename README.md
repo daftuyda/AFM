@@ -6,7 +6,11 @@
 ## Usage
  Edit the config.json file the script creates on first load with your desired scan interval, stop key and Discord webhook (optional).
  Make sure UI Navigation Toggle is On in settings.
- Go into an Endless game and press F6 to start the macro.
+ Go into an Endless game and press `start_key` to start the macro.
+
+ ### If manual mode is enabled
+ Press the `start_key` to scan for upgrades.
+ This mode will not automatically scan for upgrades but will scan for the victory screen.
 
 ## Keybinds
 | Key | Function     |
@@ -14,6 +18,20 @@
 | F6  | Start        |
 | F7  | Pause/Resume |
 | F8  | Stop         |
+
+## Config
+
+| Config        | Function                                                          |
+|---------------|-------------------------------------------------------------------|
+| auto_start    | Enables the script automatically starting when run. (True/False)  |
+| scan_interval | How often the window is scanned for upgrades. (Number in seconds) |
+| start_key     | Key that controls the script starting or controls manual mode.    |
+| pause_key     | Key that controls the script pausing/resuming.                    |
+| stop_key      | Key that stops and quits the script.                              |
+| button_delay  | Delay of the navigation speed. (Number in seconds)                |
+| webhook_url   | Discord webhook URL (Optional)                                    |
+| mode          | Controls what mode the script runs in (auto/manual)               |
+| debug         | Enables debug messages to the console (True/False)                |
 
 ## How it works
  This macro will scann the screen every X seconds that is set as the scan interval.
