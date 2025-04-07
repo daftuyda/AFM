@@ -1,5 +1,6 @@
 # AFM
  [![](https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e)](https://discord.gg/BzVmGXQ22e)
+ Join the support server to stay up to date and to report any issues you have.
  
  [![Build Workflow](https://github.com/daftuyda/AFM/actions/workflows/build.yml/badge.svg)](https://github.com/daftuyda/AFM/actions/workflows/build.yml)
 
