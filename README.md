@@ -1,4 +1,4 @@
-# AFM
+# [AFM - Latest Release](https://github.com/daftuyda/AFM/releases/download/v1.0/AFM.zip)
  [![](https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e)](https://discord.gg/BzVmGXQ22e)
  Join the support server to stay up to date and to report any issues you have.
  
