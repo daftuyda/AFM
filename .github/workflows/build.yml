@@ -39,21 +39,16 @@ jobs:
           name: Windows_daftuyda
           path: AFM.zip
 
-      # Generate a proper tag name
-      - name: Get timestamp
-        id: date
-        run: echo "date=$(date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
-
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v1.0.0-${{ steps.date.outputs.date }}
-          release_name: Release v1.0.0-${{ steps.date.outputs.date }}
+          tag_name: v1.0
+          release_name: Release v1.0
           body: |
-            Automated release
+            Initial release.
           draft: false
           prerelease: true
 
