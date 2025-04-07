@@ -2,11 +2,11 @@ name: Build Workflow
 
 on:
   push:
-    branches: [ master ]
+    # branches: [ master ]
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,11 +25,24 @@ jobs:
         run: |
           python -m PyInstaller AFM.spec
 
+      # Create a zip file with both the exe and images folder
+      - name: Create distribution zip
+        run: |
+          mkdir -p package
+          cp -r dist/AFM.exe package/
+          cp -r images package/
+          Compress-Archive -Path package/* -DestinationPath AFM.zip -Force
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Windows_daftuyda
-          path: dist/AFM.exe
+          path: AFM.zip
+
+      # Generate a proper tag name
+      - name: Get timestamp
+        id: date
+        run: echo "date=$(date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
@@ -37,8 +50,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          draft: true
-          prerelease: false
+          tag_name: v1.0.0-${{ steps.date.outputs.date }}
+          release_name: Release v1.0.0-${{ steps.date.outputs.date }}
+          body: |
+            Automated release
+          draft: false
+          prerelease: true
 
       - name: Upload Release Asset
         id: upload-release-asset
@@ -47,6 +64,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/AFM.exe
-          asset_name: AFM.exe
+          asset_path: AFM.zip
+          asset_name: AFM.zip
           asset_content_type: application/zip
