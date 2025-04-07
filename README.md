@@ -1,7 +1,11 @@
 # AFM
+ https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e
 
 ## What is this
  A automatic endless macro for the Roblox game Anime Fantasy Kingdom.
+
+## Is this safe?
+ There is currently no word from the staff to say macros are banned, so until further notice this will stay up. The exe itself that is bundled with the release is also safe. Everything is built by Github actions so there can be no tampering with the package. All source code is avaliable to check here and the only web requests it makes is when sending a Discord webhook.
 
 ## Usage
  Edit the config.json file the script creates on first load with your desired scan interval, stop key and Discord webhook (optional).
