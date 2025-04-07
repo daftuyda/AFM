@@ -462,12 +462,10 @@ def select_best_upgrade(upgrades):
     # New improved sorting logic
     def get_sort_key(upgrade):
         # Priority groups (lower number = higher priority)
-        if upgrade['original_upgrade'] in ['regen.png', 'boss.png']:
-            group = 0  # Highest priority
-        elif UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6:
-            group = 1  # High priority
+        if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6:
+            group = 0  # High priority (first 6 in UPGRADE_PRIORITY)
         else:
-            group = 2  # Low priority
+            group = 1  # Low priority
 
         # For percent upgrades, boost priority within their group
         percent_boost = 0 if upgrade.get('is_percent', False) else 1
@@ -485,10 +483,8 @@ def select_best_upgrade(upgrades):
         log.debug("Valid upgrades sorted:")
         for idx, upgrade in enumerate(valid_upgrades, 1):
             perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
-            group = ["TOP", "HIGH", "LOW"][
-                0 if upgrade['original_upgrade'] in ['discount.png', 'boss.png', 'regen.png'] else
-                1 if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 5 else 2
-            ]
+            # Determine group for debug display
+            group = "HIGH" if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6 else "LOW"
             log.debug(f"{idx}. [{group}] {upgrade['upgrade']}{perc} ({upgrade['rarity']}) at pos {upgrade['position']}")
 
     # Try to select best upgrade
