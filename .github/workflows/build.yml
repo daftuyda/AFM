@@ -2,11 +2,11 @@ name: Build Workflow
 
 on:
   push:
-    # branches: [ master ]
+    branches: [ master ]
 
 jobs:
   build-windows:
-    runs-on: windows-2019
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,11 +37,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event.head_commit.message }}
-          release_name: ${{ github.event.head_commit.message }}
-          body: |
-            Release v1.0.0
-          draft: false
+          draft: true
           prerelease: false
 
       - name: Upload Release Asset
