@@ -1,5 +1,7 @@
 # AFM
- https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e
+ [![](https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e)](https://discord.gg/BzVmGXQ22e)
+ 
+ [![Build Workflow](https://github.com/daftuyda/AFM/actions/workflows/build.yml/badge.svg)](https://github.com/daftuyda/AFM/actions/workflows/build.yml)
 
 ## What is this
  A automatic endless macro for the Roblox game Anime Fantasy Kingdom.
