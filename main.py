@@ -19,9 +19,9 @@ from collections import defaultdict
 
 DEFAULT_CONFIG = {
     "scan_interval": 5,
-    "start_key": "f6",
-    "pause_key": "f7",
-    "stop_key": "f8",
+    "start_key": "F6",
+    "pause_key": "F7",
+    "stop_key": "F8",
     "auto_start": False,
     "webhook_url": "",
     "mode": "auto",
@@ -400,13 +400,13 @@ def is_percent_upgrade(screenshot, position):
         y_end = height * 2 // 3 + 40  # End lower down
         
         # Position-specific horizontal regions - now showing full card width
-        if position == 0:  # Left upgrade
+        if position == 0:            # Left upgrade
             x_start = 0              # Start at very left
             x_end = width            # End at very right
-        elif position == 2:  # Right upgrade
+        elif position == 2:          # Right upgrade
             x_start = 0              # Start at very left
             x_end = width            # End at very right
-        else:  # Middle upgrade
+        else:                        # Middle upgrade
             x_start = 0              # Start at very left
             x_end = width            # End at very right
 
@@ -692,23 +692,23 @@ def restart_run():
     try:
         time.sleep(BUTTON_DELAY)
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
+        time.sleep(BUTTON_DELAY/2)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
         for _ in range(3):
             pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY)
+            time.sleep(BUTTON_DELAY/2)
             pydirectinput.keyUp('down')
             time.sleep(BUTTON_DELAY)
             
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY)
+        time.sleep(BUTTON_DELAY/2)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
+        time.sleep(BUTTON_DELAY/2)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         

@@ -46,11 +46,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v1.0
-          release_name: Release v1.0
+          release_name: AFM Endless Macro - v1.0
           body: |
             Initial release.
-          draft: false
-          prerelease: true
+          draft: true
+          prerelease: false
 
       - name: Upload Release Asset
         id: upload-release-asset
