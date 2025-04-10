@@ -12,6 +12,7 @@ import platform
 import ctypes
 import logging
 import mss
+import re
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
@@ -26,6 +27,15 @@ DEFAULT_CONFIG = {
     "webhook_url": "",
     "mode": "auto",
     "button_delay": 0.1,
+    "session_id": "",
+    "total_players": 4,
+    "api_key": "Secret",
+    "synchronization_timeout": 30,
+    "join_delay": 5,
+    "max_reconnect_attempts": 3,
+    "reconnect_delay": 30,
+    "coordination_server": "",
+    "game_link": "",
     "debug": False
 }
 
@@ -53,7 +63,6 @@ DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
 MODE = config.get("mode", "auto")
 
-IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.8
 UI_TOGGLE_KEY = '\\'
 DEBOUNCE_TIME = 0.3
@@ -68,6 +77,10 @@ is_running = False
 is_paused = False
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
+last_disconnect_check = 0
+reconnect_attempts = 0
+synchronization_start_time = 0
+players_ready = set()
 
 IMAGE_FOLDER = "images"
 UPGRADE_PRIORITY = [
@@ -85,6 +98,8 @@ UPGRADE_PRIORITY = [
 ]
 
 VICTORY_TEMPLATE = "victory.png"
+DISCONNECT_TEMPLATE = "disconnected.png"
+MENU_TEMPLATE = "menu.png"
 
 RARITY_COLORS = {
     (71, 99, 189): "Common",     # Blue
@@ -747,6 +762,303 @@ def is_key_pressed(key, check_hold=False):
     key_hold_state[key] = True
     return True
 
+def teleport_to_endless():
+    try:
+        if DEBUG:
+            log.debug(f"Teleporting to Endless Area")
+        
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        
+        pydirectinput.keyDown('down')
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp('down')
+        time.sleep(BUTTON_DELAY)
+        
+        pydirectinput.keyDown('enter')
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp('enter')
+        time.sleep(BUTTON_DELAY)
+        
+        for _ in range(2):
+            pydirectinput.keyDown('down')
+            time.sleep(BUTTON_DELAY/2)
+            pydirectinput.keyUp('down')
+            time.sleep(BUTTON_DELAY)
+        
+        pydirectinput.keyDown('enter')
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp('enter')
+        time.sleep(BUTTON_DELAY)
+        
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        
+        return True
+        
+    except Exception as e:
+        log.error(f"Navigation error: {str(e)}")
+        return False
+
+def move_to_endless():
+    try:
+        if DEBUG:
+            log.debug("Moving to Endless Area")
+            
+        time.sleep(1) 
+        
+        pydirectinput.keyDown('shift')
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp('shift')
+        time.sleep(BUTTON_DELAY)
+        
+        pydirectinput.keyDown('right')
+        time.sleep(0.55)
+        pydirectinput.keyUp('right')
+        time.sleep(BUTTON_DELAY)
+        
+        for _ in range(2):
+            pydirectinput.keyDown('q')
+            time.sleep(BUTTON_DELAY/2)
+            pydirectinput.keyUp('q')
+            time.sleep(1)
+        
+        return True
+        
+    except Exception as e:
+        log.error(f"Move to Endless error: {str(e)}")
+        return False
+    
+def toggle_troops():
+    try:
+        if DEBUG:
+            log.debug("Enabling Auto Troops")
+            
+        time.sleep(1)
+        
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+
+        for _ in range(3):
+            pydirectinput.keyDown('down')
+            time.sleep(BUTTON_DELAY/2)
+            pydirectinput.keyUp('down')
+            time.sleep(BUTTON_DELAY)
+            
+        pydirectinput.keyDown('enter')
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp('enter')
+        time.sleep(BUTTON_DELAY)
+            
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY/2)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        
+        return True
+        
+    except Exception as e:
+        log.error(f"Auto Troops Error: {str(e)}")
+        return False
+
+def detect_disconnection():
+    global last_disconnect_check
+    try:
+        window = get_roblox_window()
+        if not window:
+            return True
+            
+        # Check for disconnect message template
+        screenshot = get_window_screenshot(window)
+        template = cv2.imread(get_template_path(DISCONNECT_TEMPLATE))
+        if template is None:
+            return False
+            
+        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, _ = cv2.minMaxLoc(res)
+        return confidence > CONFIDENCE_THRESHOLD
+        
+    except Exception as e:
+        log.error(f"Disconnect detection error: {str(e)}")
+        return False
+
+def detect_menu():
+    try:
+        window = get_roblox_window()
+        if not window:
+            return True
+            
+        # Check for disconnect message template
+        screenshot = get_window_screenshot(window)
+        template = cv2.imread(get_template_path(MENU_TEMPLATE))
+        if template is None:
+            return False
+            
+        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, _ = cv2.minMaxLoc(res)
+        return confidence > CONFIDENCE_THRESHOLD
+        
+    except Exception as e:
+        log.error(f"Disconnect detection error: {str(e)}")
+        return False
+
+def launch_roblox_game():
+    """Launch game directly in Roblox player without browser tabs"""
+    try:
+        if not config["game_link"]:
+            return False
+
+        # Extract game ID from URL
+        #match = re.search(r'games/(\d+)', config["game_link"])
+        #if not match:
+            # log.error("Invalid game link format. Could not extract game ID.")
+            # return False
+        #\game_id = match.group(1)
+        roblox_url = config["game_link"]
+        #f'roblox://experiences/start?placeId={game_id}'
+
+        # Platform-specific launch commands
+        if platform.system() == "Windows":
+            os.system(f'start "" "{roblox_url}"')
+        elif platform.system() == "Darwin":
+            os.system(f'open "{roblox_url}"')
+        else:
+            os.system(f'xdg-open "{roblox_url}"')
+            
+        return True
+    except Exception as e:
+        log.error(f"Game launch failed: {str(e)}")
+        return False
+
+def reconnect_to_game():
+    global reconnect_attempts
+
+    log.info("Attempting to reconnect...")
+
+    try:
+        # Launch game using stored link
+        if config["game_link"]:
+            launch_roblox_game()
+            start_time = time.time()
+
+            while True:
+                # Wait for SCAN_INTERVAL seconds before each check
+                if time.time() - start_time >= SCAN_INTERVAL:
+                    start_time = time.time()  # reset timer
+
+                    if detect_menu():
+                        log.info("Game loaded successfully")
+
+                        # Focus and press reconnect button
+                        focus_roblox_window()
+                        time.sleep(1)
+                        teleport_to_endless()
+                        time.sleep(1)
+                        move_to_endless()
+                        time.sleep(30)
+                        toggle_troops()
+                        reconnect_attempts = 0
+                        return True
+
+                time.sleep(1)  # Avoid tight looping (optional, for CPU friendliness)
+
+        return False
+
+    except Exception as e:
+        log.error(f"Reconnect failed: {str(e)}")
+        reconnect_attempts += 1
+        return False
+
+def coordinate_with_server():
+    """Handle server communication with proper error checking"""
+    try:
+        server_url = config["coordination_server"].rstrip('/')
+        
+        # Get status from server
+        response = requests.get(
+            f"{server_url}/status/{config['session_id']}",
+            headers={"X-API-Key": config["api_key"]},
+            timeout=10
+        )
+        
+        # Validate response format
+        if response.status_code == 200:
+            return response.json()
+        return {"ready_count": 0}  # Default safe value
+        
+    except Exception as e:
+        log.error(f"Server communication error: {str(e)}")
+        return {"ready_count": 0}  # Ensure consistent return type
+
+    except Exception as e:
+        log.error(f"Coordination failed: {str(e)}")
+        return False
+
+def synchronized_start():
+    """Full synchronization process with proper player tracking"""
+    try:
+        # 1. Register player
+        reg_response = requests.post(
+            f"{config['coordination_server']}/register",
+            json={
+                "session_id": config["session_id"],
+                "total_players": config["total_players"]
+            },
+            headers={"X-API-Key": config["api_key"]},
+            timeout=5
+        )
+        
+        if reg_response.status_code != 200:
+            log.error("Registration failed")
+            return False
+            
+        # Store generated player ID
+        player_id = reg_response.json().get('player_id')
+        config["player_id"] = player_id
+
+        # 2. Mark ready
+        ready_response = requests.post(
+            f"{config['coordination_server']}/ready",
+            json={"player_id": player_id},
+            headers={"X-API-Key": config["api_key"]},
+            timeout=5
+        )
+        
+        if ready_response.status_code != 200:
+            log.error("Ready check failed")
+            return False
+
+        # 3. Monitor status
+        start_time = time.time()
+        while time.time() - start_time < config["synchronization_timeout"]:
+            status_response = requests.get(
+                f"{config['coordination_server']}/status/{config['session_id']}",
+                headers={"X-API-Key": config["api_key"]},
+                timeout=5
+            )
+            
+            if status_response.status_code == 200:
+                status = status_response.json()
+                log.info(f"Players ready: {status['ready_count']}/{config['total_players']}")
+                
+                if status['ready_count'] >= config['total_players']:
+                    log.info("All players ready! Starting run...")
+                    return True
+                    
+            time.sleep(5)
+            
+        return False
+        
+    except Exception as e:
+        log.error(f"Synchronization error: {str(e)}")
+        return False
+
 def manual_mode_loop():
     global is_running, is_paused
     log.info("=== Manual Mode ===")
@@ -781,7 +1093,7 @@ def manual_mode_loop():
         time.sleep(0.05)
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused
+    global run_start_time, victory_detected, is_running, is_paused, last_disconnect_check, reconnect_attempts
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
@@ -818,6 +1130,18 @@ def main_loop():
             is_paused = not is_paused
             log.info(f"=== {'Paused' if is_paused else 'Resumed'} ===")
             time.sleep(0.5)  # Debounce
+            
+        # Disconnection check
+        if time.time() - last_disconnect_check > 60:  # Check every minute
+            if detect_disconnection() or not get_roblox_window():
+                log.error("Disconnection detected!")
+                if reconnect_attempts < config["max_reconnect_attempts"]:
+                    if reconnect_to_game():
+                        restart_run()
+                else:
+                    log.error("Max reconnect attempts reached!")
+                    is_running = False
+            last_disconnect_check = time.time()
         
         # Only run logic when active and not paused
         if is_running and not is_paused:
@@ -830,6 +1154,10 @@ def main_loop():
                     if victory_detected:
                         restart_run()
                 last_victory_check = current_time
+                
+            # if needs_synchronization:
+            #     if synchronized_start():
+            #         restart_run()
                 
             # Upgrade scanning
             if current_time - last_scan > SCAN_INTERVAL:
@@ -853,4 +1181,6 @@ def main_loop():
             time.sleep(0.1)  # Reduce CPU usage
 
 if __name__ == "__main__":
+    #synchronized_start()
+    #reconnect_to_game()
     main_loop()
