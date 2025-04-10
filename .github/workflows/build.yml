@@ -45,12 +45,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+<<<<<<< Updated upstream
           tag_name: v1.0
           release_name: Release v1.0
           body: |
             Initial release.
           draft: false
           prerelease: true
+=======
+          tag_name: v1.1
+          release_name: AFM Endless Macro - v1.1
+          body: |
+            Placeholder for release notes.
+          draft: true
+          prerelease: false
+>>>>>>> Stashed changes
 
       - name: Upload Release Asset
         id: upload-release-asset
