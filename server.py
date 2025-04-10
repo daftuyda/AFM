@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from datetime import datetime, timedelta
 import threading
+import uuid
 
 app = Flask(__name__)
 lock = threading.Lock()
@@ -13,7 +14,7 @@ players = {}
 API_KEY = "Secret"
 ALLOWED_ORIGINS = [
     "http://localhost",
-    "http://127.0.0.1",
+    "http://127.0.0.1"
 ]
 
 @app.before_request
@@ -37,26 +38,38 @@ def add_cors_headers(response):
 @app.route('/register', methods=['POST'])
 def register_player():
     with lock:
-        data = request.json
-        session_id = data['session_id']
-        player_id = data.get('player_id', str(uuid.uuid4()))  # Generate unique player ID
-        
-        # Create session if not exists
-        if session_id not in sessions:
-            sessions[session_id] = {
-                'total_players': data['total_players'],
-                'ready_players': set(),
-                'start_time': None
+        try:
+            data = request.json
+            session_id = data['session_id']
+            
+            # Generate player ID if not provided
+            player_id = data.get('player_id') or str(uuid.uuid4())
+            
+            # Initialize session if needed
+            if session_id not in sessions:
+                sessions[session_id] = {
+                    'total_players': data['total_players'],
+                    'ready_players': set(),
+                    'start_time': None
+                }
+            
+            # Register player
+            players[player_id] = {
+                'session_id': session_id,
+                'ready': False,
+                'last_seen': datetime.now().isoformat()
             }
-        
-        # Register player
-        players[player_id] = {
-            'session_id': session_id,
-            'ready': False,
-            'last_seen': datetime.now().isoformat()
-        }
-        
-        return jsonify({"player_id": player_id, "status": "registered"})
+            
+            return jsonify({
+                "status": "registered",
+                "player_id": player_id,
+                "session_id": session_id
+            })
+            
+        except KeyError as e:
+            return jsonify({"error": f"Missing required field: {str(e)}"}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
 @app.route('/ready', methods=['POST'])
 def mark_ready():
@@ -91,7 +104,7 @@ def get_status(session_id):
             
         return jsonify({
             "total_players": sessions[session_id]['total_players'],
-            "ready_players": sessions[session_id]['ready_count'],
+            "ready_players": len(sessions[session_id]['ready_players']),
             "start_time": sessions[session_id].get('start_time')  # Safe get
         })
 

@@ -1004,18 +1004,29 @@ def synchronized_start():
     """Full synchronization process with proper player tracking"""
     try:
         # 1. Register player
-        reg_response = requests.post(
-            f"{config['coordination_server']}/register",
-            json={
-                "session_id": config["session_id"],
-                "total_players": config["total_players"]
-            },
-            headers={"X-API-Key": config["api_key"]},
-            timeout=5
-        )
-        
-        if reg_response.status_code != 200:
-            log.error("Registration failed")
+        for attempt in range(3):
+            try:
+                reg_response = requests.post(
+                    f"{config['coordination_server']}/register",
+                    json={
+                        "session_id": config["session_id"],
+                        "total_players": config["total_players"]
+                    },
+                    headers={"X-API-Key": config["api_key"]},
+                    timeout=5
+                )
+                
+                if reg_response.status_code == 200:
+                    player_data = reg_response.json()
+                    config["player_id"] = player_data["player_id"]
+                    log.info(f"Registered as player {config['player_id']}")
+                    break
+                    
+            except Exception as e:
+                log.warning(f"Registration attempt {attempt+1} failed: {str(e)}")
+                time.sleep(2)
+        else:
+            log.error("Registration failed after 3 attempts")
             return False
             
         # Store generated player ID
@@ -1045,9 +1056,8 @@ def synchronized_start():
             
             if status_response.status_code == 200:
                 status = status_response.json()
-                log.info(f"Players ready: {status['ready_count']}/{config['total_players']}")
-                
-                if status['ready_count'] >= config['total_players']:
+                log.info(f"Players ready: {status['ready_players']}/{config['total_players']}") 
+                if status['ready_players'] >= config['total_players']:
                     log.info("All players ready! Starting run...")
                     return True
                     
