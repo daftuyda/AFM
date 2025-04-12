@@ -27,15 +27,6 @@ DEFAULT_CONFIG = {
     "webhook_url": "",
     "mode": "auto",
     "button_delay": 0.1,
-    "session_id": "",
-    "total_players": 4,
-    "api_key": "Secret",
-    "synchronization_timeout": 30,
-    "join_delay": 5,
-    "max_reconnect_attempts": 3,
-    "reconnect_delay": 30,
-    "coordination_server": "",
-    "game_link": "",
     "debug": False
 }
 
@@ -78,9 +69,6 @@ is_paused = False
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
 last_disconnect_check = 0
-reconnect_attempts = 0
-synchronization_start_time = 0
-players_ready = set()
 
 IMAGE_FOLDER = "images"
 UPGRADE_PRIORITY = [
@@ -130,6 +118,263 @@ else:
 
     def allow_sleep():
         pass
+
+class NetworkManager:
+    def __init__(self):
+        # Initialize with default values
+        self.config = {
+            "enable_networking": False,
+            "coordination_server": "http://api.daftuyda.moe",
+            "default_session_id": "default_session",
+            "api_key": "Secret",
+            "total_players": 4,
+            "move_delay": 2
+        }
+        
+        # Try to load network_config.json if it exists
+        try:
+            if os.path.exists('network_config.json'):
+                with open('network_config.json') as f:
+                    loaded_config = json.load(f)
+                    self.config.update(loaded_config)
+        except Exception as e:
+            log.error(f"Error loading network config: {e}")
+        
+        self.session_id = self.config["default_session_id"]
+        self.player_id = None
+        self.move_order = 0
+        self.current_sequence = 0
+        self.last_status_check = 0
+        self.last_move_time = 0
+        self.last_ping_time = 0
+        self.ping_interval = 15  # Ping every 15 seconds
+
+    def send_ping(self):
+        if not self.config["enable_networking"] or not self.player_id:
+            return False
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/ping",
+                json={"player_id": self.player_id},
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            return response.status_code == 200
+        except Exception as e:
+            log.error(f"Ping failed: {str(e)}")
+            return False
+
+    def check_auto_start(self):
+        if not self.config["enable_networking"]:
+            return False
+            
+        status = self.check_status()
+        if status and status.get("started", False):
+            return True
+            
+        # Send periodic pings
+        if time.time() - self.last_ping_time > self.ping_interval:
+            self.send_ping()
+            self.last_ping_time = time.time()
+            
+        return False
+    
+    def synchronized_start(self):
+        global is_running
+        
+        if not self.config["enable_networking"]:
+            log.info("Networking disabled - starting solo run")
+            return True
+            
+        # Register player
+        if not self.register_player(self.config["total_players"]):
+            log.error("Failed to register player")
+            return False
+            
+        log.info("Waiting for party...")
+        
+        while True:
+            # Check for auto-start condition
+            if self.check_auto_start():
+                log.info("Auto-start triggered")
+                break
+                
+            status = self.check_status()
+            if not status:
+                time.sleep(5)
+                continue
+                
+            log.info(f"Party status: {len(status.get('players', []))}/{self.config['total_players']} players")
+            
+            # Check if manually started (all players ready)
+            if status.get("ready_players", 0) >= status.get("total_players", 4):
+                log.info("All players ready!")
+                break
+                
+            # Check for disconnections
+            if status.get("disconnected_players"):
+                log.error("Other players disconnected - aborting")
+                return False
+                
+            time.sleep(5)
+        
+        # Proceed with game start
+        is_running = True
+        return True
+
+    def register_player(self, total_players=4):
+        if not self.config["enable_networking"]:
+            return False
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/register",
+                json={
+                    "session_id": self.session_id,
+                    "total_players": total_players
+                },
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.player_id = data["player_id"]
+                self.move_order = data["order"]
+                log.info(f"Registered as player {self.player_id} (order {self.move_order})")
+                return True
+                
+        except Exception as e:
+            log.error(f"Registration failed: {str(e)}")
+            return False
+
+    def mark_ready(self):
+        if not self.config["enable_networking"] or not self.player_id:
+            return False
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/ready",
+                json={"player_id": self.player_id},
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            return response.status_code == 200
+            
+        except Exception as e:
+            log.error(f"Ready check failed: {str(e)}")
+            return False
+
+    def mark_loaded(self):
+        if not self.config["enable_networking"] or not self.player_id:
+            return False, 0
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/loaded",
+                json={"player_id": self.player_id},
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data["all_loaded"], data["move_sequence"]
+        except Exception as e:
+            log.error(f"Loaded check failed: {str(e)}")
+            
+        return False, 0
+
+    def check_status(self):
+        if not self.config["enable_networking"]:
+            return None
+            
+        try:
+            response = requests.get(
+                f"{self.config['coordination_server']}/status/{self.session_id}",
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            log.error(f"Status check failed: {str(e)}")
+            
+        return None
+
+    def mark_disconnected(self):
+        if not self.config["enable_networking"] or not self.player_id:
+            return False
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/disconnect",
+                json={"player_id": self.player_id},
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            return response.status_code == 200
+        except Exception as e:
+            log.error(f"Disconnect notification failed: {str(e)}")
+            return False
+
+    def get_next_move(self):
+        if not self.config["enable_networking"] or not self.player_id:
+            return self.move_order, self.current_sequence
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/next_move",
+                json={"player_id": self.player_id},
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data["move_order"], data["current_sequence"]
+        except Exception as e:
+            log.error(f"Move check failed: {str(e)}")
+            
+        return self.move_order, self.current_sequence
+
+    def wait_for_move_turn(self):
+        if not self.config["enable_networking"]:
+            return True
+            
+        while True:
+            status = self.check_status()
+            if not status:
+                time.sleep(1)
+                continue
+                
+            if status.get("current_move_order") == self.move_order and \
+               status.get("current_sequence") > self.current_sequence:
+                self.current_sequence = status["current_sequence"]
+                self.last_move_time = time.time()
+                return True
+                
+            time.sleep(0.5)
+
+    def complete_move(self):
+        if not self.config["enable_networking"]:
+            return True
+            
+        try:
+            response = requests.post(
+                f"{self.config['coordination_server']}/complete_move",
+                json={
+                    "player_id": self.player_id,
+                    "sequence": self.current_sequence
+                },
+                headers={"X-API-Key": self.config['api_key']},
+                timeout=5
+            )
+            return response.status_code == 200
+        except Exception as e:
+            log.error(f"Move completion failed: {str(e)}")
+            return False
+
+network = NetworkManager()
 
 def setup_logging():
     # Clear previous log file on startup
@@ -482,14 +727,10 @@ def select_best_upgrade(upgrades):
         else:
             group = 1  # Low priority
 
-        # For percent upgrades, boost priority within their group
-        percent_boost = 0 if upgrade.get('is_percent', False) else 1
-
         return (
-            group,          # Primary group
-            percent_boost,  # Percent gets priority within group
-            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first
-            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority
+            group,                          # Primary group (high/low priority)
+            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first within group
+            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority order
         )
 
     valid_upgrades.sort(key=get_sort_key)
@@ -763,6 +1004,11 @@ def is_key_pressed(key, check_hold=False):
     return True
 
 def teleport_to_endless():
+    if config.get("enable_networking", False):
+        if not network.wait_for_move_turn():
+            log.error("Failed to get move turn")
+            return False
+        
     try:
         if DEBUG:
             log.debug(f"Teleporting to Endless Area")
@@ -798,6 +1044,9 @@ def teleport_to_endless():
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
+        if config.get("enable_networking", False):
+            network.complete_move()
+        
         return True
         
     except Exception as e:
@@ -805,6 +1054,11 @@ def teleport_to_endless():
         return False
 
 def move_to_endless():
+    if config.get("enable_networking", False):
+        if not network.wait_for_move_turn():
+            log.error("Failed to get move turn")
+            return False
+    
     try:
         if DEBUG:
             log.debug("Moving to Endless Area")
@@ -826,6 +1080,9 @@ def move_to_endless():
             time.sleep(BUTTON_DELAY/2)
             pydirectinput.keyUp('q')
             time.sleep(1)
+            
+        if config.get("enable_networking", False):
+            network.complete_move()
         
         return True
         
@@ -914,14 +1171,7 @@ def launch_roblox_game():
         if not config["game_link"]:
             return False
 
-        # Extract game ID from URL
-        #match = re.search(r'games/(\d+)', config["game_link"])
-        #if not match:
-            # log.error("Invalid game link format. Could not extract game ID.")
-            # return False
-        #\game_id = match.group(1)
         roblox_url = config["game_link"]
-        #f'roblox://experiences/start?placeId={game_id}'
 
         # Platform-specific launch commands
         if platform.system() == "Windows":
@@ -1001,73 +1251,57 @@ def coordinate_with_server():
         return False
 
 def synchronized_start():
-    """Full synchronization process with proper player tracking"""
-    try:
-        # 1. Register player
-        for attempt in range(3):
-            try:
-                reg_response = requests.post(
-                    f"{config['coordination_server']}/register",
-                    json={
-                        "session_id": config["session_id"],
-                        "total_players": config["total_players"]
-                    },
-                    headers={"X-API-Key": config["api_key"]},
-                    timeout=5
-                )
-                
-                if reg_response.status_code == 200:
-                    player_data = reg_response.json()
-                    config["player_id"] = player_data["player_id"]
-                    log.info(f"Registered as player {config['player_id']}")
-                    break
-                    
-            except Exception as e:
-                log.warning(f"Registration attempt {attempt+1} failed: {str(e)}")
-                time.sleep(2)
-        else:
-            log.error("Registration failed after 3 attempts")
-            return False
-            
-        # Store generated player ID
-        player_id = reg_response.json().get('player_id')
-        config["player_id"] = player_id
-
-        # 2. Mark ready
-        ready_response = requests.post(
-            f"{config['coordination_server']}/ready",
-            json={"player_id": player_id},
-            headers={"X-API-Key": config["api_key"]},
-            timeout=5
-        )
+    global network
+    
+    if not network.config["enable_networking"]:
+        log.info("Networking disabled - starting solo run")
+        return True
         
-        if ready_response.status_code != 200:
-            log.error("Ready check failed")
-            return False
-
-        # 3. Monitor status
-        start_time = time.time()
-        while time.time() - start_time < config["synchronization_timeout"]:
-            status_response = requests.get(
-                f"{config['coordination_server']}/status/{config['session_id']}",
-                headers={"X-API-Key": config["api_key"]},
-                timeout=5
-            )
-            
-            if status_response.status_code == 200:
-                status = status_response.json()
-                log.info(f"Players ready: {status['ready_players']}/{config['total_players']}") 
-                if status['ready_players'] >= config['total_players']:
-                    log.info("All players ready! Starting run...")
-                    return True
-                    
+    # Register player using the network manager's config
+    if not network.register_player(network.config["total_players"]):
+        log.error("Failed to register player")
+        return False
+        
+    # Mark ready
+    if not network.mark_ready():
+        log.error("Failed to mark ready")
+        return False
+        
+    log.info("Waiting for all players...")
+    
+    while True:
+        status = network.check_status()
+        if not status:
             time.sleep(5)
+            continue
             
-        return False
+        log.info(f"Players ready: {status.get('ready_players', 0)}/{status.get('total_players', 4)}")
         
-    except Exception as e:
-        log.error(f"Synchronization error: {str(e)}")
-        return False
+        # Check if all players are ready
+        if status.get("ready_players", 0) >= status.get("total_players", 4):
+            log.info("All players ready! Starting game...")
+            
+            # Launch game
+            launch_roblox_game()
+            
+            # Wait for game to load
+            while True:
+                if detect_menu():
+                    log.info("Game loaded - notifying server")
+                    all_loaded, move_sequence = network.mark_loaded()
+                    
+                    if all_loaded:
+                        log.info("All players loaded - starting movement sequence")
+                        return True
+                        
+                time.sleep(5)
+                
+        # Check for disconnections
+        if status.get("disconnected_players"):
+            log.error("Other players disconnected - aborting")
+            return False
+            
+        time.sleep(5)
 
 def manual_mode_loop():
     global is_running, is_paused
@@ -1103,7 +1337,7 @@ def manual_mode_loop():
         time.sleep(0.05)
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused, last_disconnect_check, reconnect_attempts
+    global run_start_time, victory_detected, is_running, is_paused, last_disconnect_check, last_status_check, reconnect_attempts
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
@@ -1153,6 +1387,27 @@ def main_loop():
                     is_running = False
             last_disconnect_check = time.time()
         
+        if network.config("enable_networking", False) and time.time() - last_status_check > 30:
+            status = network.check_status()
+            if status and status.get("disconnected_players"):
+                log.error("Other players disconnected - restarting")
+                if network.mark_disconnected():
+                    restart_run()
+                continue
+            last_status_check = time.time()
+            
+        if network.config["enable_networking"]:
+            # Send periodic pings
+            if time.time() - network.last_ping_time > network.ping_interval:
+                network.send_ping()
+                
+        if config.get("enable_networking", False):
+            if not network.synchronized_start():
+                log.error("Network startup failed, running solo")
+                main_loop()
+        else:
+            main_loop()
+            
         # Only run logic when active and not paused
         if is_running and not is_paused:
             prevent_sleep()   
@@ -1164,10 +1419,6 @@ def main_loop():
                     if victory_detected:
                         restart_run()
                 last_victory_check = current_time
-                
-            # if needs_synchronization:
-            #     if synchronized_start():
-            #         restart_run()
                 
             # Upgrade scanning
             if current_time - last_scan > SCAN_INTERVAL:
@@ -1191,6 +1442,6 @@ def main_loop():
             time.sleep(0.1)  # Reduce CPU usage
 
 if __name__ == "__main__":
-    #synchronized_start()
+    synchronized_start()
     #reconnect_to_game()
-    main_loop()
+    #main_loop()
