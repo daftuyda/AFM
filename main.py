@@ -1442,6 +1442,6 @@ def main_loop():
             time.sleep(0.1)  # Reduce CPU usage
 
 if __name__ == "__main__":
-    synchronized_start()
+    #synchronized_start()
     #reconnect_to_game()
-    #main_loop()
+    main_loop()
