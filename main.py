@@ -25,7 +25,23 @@ DEFAULT_CONFIG = {
     "auto_start": False,
     "webhook_url": "",
     "mode": "auto",
-    "button_delay": 0.1,
+    "money_mode": False,
+    "button_delay": 0.2,
+    "high_priority": [
+        "regen",
+        "boss",
+        "discount",
+        "atk",
+        "health",
+        "units"
+    ],
+    "low_priority": [
+        "luck",
+        "speed",
+        "heal",
+        "jade",
+        "enemy"
+    ],
     "debug": False
 }
 
@@ -42,6 +58,9 @@ def load_config():
 
     return config
 
+def add_png_suffix(items):
+    return [f"{item}.png" if not item.endswith('.png') else item for item in items]
+
 config = load_config()
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
@@ -51,6 +70,11 @@ PAUSE_KEY = config.get("pause_key", "f7")
 STOP_KEY = config.get("stop_key", "f8")
 DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
+HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_priority"]))
+LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
+UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
+MONEY_MODE = config.get("money_mode", False)
+
 MODE = config.get("mode", "auto")
 
 IMAGE_FOLDER = "images"
@@ -70,19 +94,6 @@ last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
 
 IMAGE_FOLDER = "images"
-UPGRADE_PRIORITY = [
-    "regen.png",
-    "boss.png",
-    "discount.png",
-    "atk.png",
-    "health.png",
-    "units.png",
-    "luck.png",
-    "speed.png",
-    "heal.png",
-    "jade.png",
-    "enemy.png"
-]
 
 VICTORY_TEMPLATE = "victory.png"
 DISCONNECT_TEMPLATE = "disconnected.png"
@@ -471,21 +482,60 @@ def select_best_upgrade(upgrades):
                     return True
         return False
 
-    # New improved sorting logic
-    def get_sort_key(upgrade):
-        # Priority groups (lower number = higher priority)
-        if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6:
-            group = 0  # High priority (first 6 in UPGRADE_PRIORITY)
-        else:
-            group = 1  # Low priority
+    if MONEY_MODE:
+        # Split into boss and non-boss upgrades
+        boss_upgrades = []
+        other_upgrades = []
+        
+        for upgrade in valid_upgrades:
+            if upgrade['original_upgrade'] == 'boss.png':
+                boss_upgrades.append(upgrade)
+            else:
+                other_upgrades.append(upgrade)
+        
+        # Sort boss upgrades by highest rarity first, then original priority
+        boss_upgrades.sort(key=lambda x: (
+            -RARITY_ORDER.index(x['rarity']),
+            UPGRADE_PRIORITY.index(x['original_upgrade'])
+        ))
+        
+        # Sort other upgrades normally
+        other_upgrades.sort(key=lambda x: (
+            0 if x['original_upgrade'] in HIGH_PRIORITY else 1,
+            -RARITY_ORDER.index(x['rarity']),
+            UPGRADE_PRIORITY.index(x['original_upgrade'])
+        ))
+        
+        valid_upgrades = boss_upgrades + other_upgrades
+    else:
+        # Original sorting logic
+        def get_sort_key(upgrade):
+            if upgrade['original_upgrade'] in HIGH_PRIORITY:
+                group = 0
+            else:
+                group = 1
+            return (
+                group,
+                -RARITY_ORDER.index(upgrade['rarity']),
+                UPGRADE_PRIORITY.index(upgrade['original_upgrade'])
+            )
+        valid_upgrades.sort(key=get_sort_key)
 
-        return (
-            group,          # Primary group (high/low priority)
-            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first within group
-            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority order
-        )
+    if not MONEY_MODE:
+        def get_sort_key(upgrade):
+            # Check if the upgrade is in the high priority group
+            if upgrade['original_upgrade'] in HIGH_PRIORITY:
+                group = 0  # High priority
+            else:
+                group = 1  # Low priority
 
-    valid_upgrades.sort(key=get_sort_key)
+            return (
+                group,
+                -RARITY_ORDER.index(upgrade['rarity']),
+                UPGRADE_PRIORITY.index(upgrade['original_upgrade'])
+            )
+
+        valid_upgrades.sort(key=get_sort_key)
 
     if DEBUG:
         log.debug("Valid upgrades sorted:")
@@ -795,7 +845,11 @@ def main_loop():
     global run_start_time, victory_detected, is_running, is_paused
     
     log.info("=== AFK Endless Macro ===")
-    log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
+    log.info(f"Mode: {MODE.capitalize()} | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
+    log.info(f"Press {PAUSE_KEY} to pause/resume | {STOP_KEY} to stop")
+    log.info(f"Money Mode: {'ENABLED' if MONEY_MODE else 'disabled'}")
+    log.info(f"High priority upgrades: {', '.join([upgrade.replace('.png', '') for upgrade in HIGH_PRIORITY])}")
+    log.info(f"Low priority upgrades: {', '.join([upgrade.replace('.png', '') for upgrade in LOW_PRIORITY])}")
     
     last_scan = time.time()
     last_victory_check = time.time()

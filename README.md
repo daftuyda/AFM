@@ -38,6 +38,7 @@
 | button_delay  | Delay of the navigation speed. (Number in seconds)                |
 | webhook_url   | Discord webhook URL (Optional)                                    |
 | mode          | Controls what mode the script runs in (auto/manual)               |
+| money_mode    | Will always choose boss rewards upgrade if avaliable (True/False) |
 | debug         | Enables debug messages to the console (True/False)                |
 
 ## How it works
