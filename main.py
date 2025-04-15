@@ -625,10 +625,9 @@ def detect_victory():
         if template is None:
             return False
         
-        resized_screen = resize_to_template(screenshot, template)
-        res = cv2.matchTemplate(resized_screen, template, cv2.TM_CCOEFF_NORMED)
-            
-        #res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        template = scale_to_window(template, screenshot.shape[0])  # Use same scaling as upgrades
+        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        
         _, confidence, _, _ = cv2.minMaxLoc(res)
         
         time.sleep(2) # Wait for results to load
