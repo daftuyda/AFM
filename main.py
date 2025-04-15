@@ -845,7 +845,7 @@ def main_loop():
     global run_start_time, victory_detected, is_running, is_paused
     
     log.info("=== AFK Endless Macro ===")
-    log.info(f"Mode: {MODE.capitalize()} | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
+    log.info(f"Mode: {MODE.capitalize()} Scan | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
     log.info(f"Press {PAUSE_KEY} to pause/resume | {STOP_KEY} to stop")
     log.info(f"Money Mode: {'ENABLED' if MONEY_MODE else 'disabled'}")
     log.info(f"High priority upgrades: {', '.join([upgrade.replace('.png', '') for upgrade in HIGH_PRIORITY])}")
