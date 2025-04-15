@@ -85,6 +85,8 @@ UPGRADE_PRIORITY = [
 ]
 
 VICTORY_TEMPLATE = "victory.png"
+DISCONNECT_TEMPLATE = "disconnected.png"
+MENU_TEMPLATE = "menu.png"
 
 RARITY_COLORS = {
     (71, 99, 189): "Common",     # Blue
@@ -181,6 +183,12 @@ def get_roblox_window():
             
         window = roblox_windows[0]
         
+        # Refresh window dimensions
+        window.left = window._rect.left
+        window.top = window._rect.top
+        window.width = window._rect.width
+        window.height = window._rect.height
+        
         # Verify window is visible and has reasonable dimensions
         if window.width < 100 or window.height < 100:
             if DEBUG:
@@ -195,39 +203,81 @@ def get_roblox_window():
         return None
 
 def get_window_screenshot(window):
-    """Capture window screenshot without focusing using mss, supports any monitor"""
-    with mss.mss() as sct:
-        # Find which monitor the window is on
-        for monitor_num, monitor in enumerate(sct.monitors[1:], 1):
-            if (window.left >= monitor['left'] and 
-                window.top >= monitor['top'] and
-                window.left + window.width <= monitor['left'] + monitor['width'] and
-                window.top + window.height <= monitor['top'] + monitor['height']):
-                
-                # Calculate relative position within the monitor
-                monitor_region = {
-                    'left': window.left - monitor['left'],
-                    'top': window.top - monitor['top'],
-                    'width': window.width,
-                    'height': window.height,
-                    'mon': monitor_num
-                }
-                
-                sct_img = sct.grab(monitor_region)
-                img = np.array(sct_img)
-                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    """Capture ONLY the Roblox window using mss"""
+    if not window:
+        return None
         
-        # Fallback to primary monitor if not found (shouldn't happen)
-        monitor_region = {
-            'left': window.left,
-            'top': window.top,
-            'width': window.width,
-            'height': window.height,
-            'mon': 1
-        }
-        sct_img = sct.grab(monitor_region)
-        img = np.array(sct_img)
-        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    try:
+        with mss.mss() as sct:
+            # Get exact window coordinates including borders
+            monitor = {
+                "left": window.left,
+                "top": window.top,
+                "width": window.width,
+                "height": window.height,
+            }
+            
+            # Grab the image
+            sct_img = sct.grab(monitor)
+            img = np.array(sct_img)
+            
+            # Convert color space and return
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            
+    except Exception as e:
+        log.error(f"Window capture failed: {str(e)}")
+        return None
+
+def resize_to_template(screenshot, template):
+    h, w = screenshot.shape[:2]
+    th, tw = template.shape[:2]
+    scale = min(th/h, tw/w)
+    return cv2.resize(screenshot, (int(w*scale), int(h*scale)))
+
+def scale_to_window(image, window_height):
+    """Scale templates relative to window size"""
+    # Base template height (assuming templates made at 1080p)
+    BASE_HEIGHT = 1080
+    scale_factor = window_height / BASE_HEIGHT
+    
+    # Calculate new dimensions
+    width = int(image.shape[1] * scale_factor)
+    height = int(image.shape[0] * scale_factor)
+    
+    # Scale the image
+    return cv2.resize(image, (width, height))
+
+def match_template_in_window(screenshot, template_name):
+    """Helper function for template matching that accounts for window size"""
+    template_path = get_template_path(template_name)
+    template = cv2.imread(template_path)
+    if template is None:
+        return 0.0, (0, 0)
+        
+    # Scale template relative to window size
+    window_height = screenshot.shape[0]
+    scale_factor = window_height / 1080  # Assuming 1080p base resolution
+    new_width = int(template.shape[1] * scale_factor)
+    new_height = int(template.shape[0] * scale_factor)
+    template = cv2.resize(template, (new_width, new_height))
+    
+    # Perform matching
+    res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    
+    # Debug visualization
+    if DEBUG and max_val > 0.5:
+        debug_img = screenshot.copy()
+        cv2.rectangle(debug_img,
+                     max_loc,
+                     (max_loc[0] + new_width, max_loc[1] + new_height),
+                     (0, 255, 0), 2)
+        cv2.putText(debug_img, f"{template_name} {max_val:.2f}",
+                   (max_loc[0], max_loc[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                   (0, 255, 0), 1)
+    
+    return max_val, max_loc
 
 def scan_for_upgrades(max_attempts=3):
     attempts = 0
@@ -240,109 +290,85 @@ def scan_for_upgrades(max_attempts=3):
                 time.sleep(1)
                 attempts += 1
                 continue
-            
-            # Capture the entire window screenshot using mss
+                
+            # Get window screenshot
             screenshot = get_window_screenshot(window)
             if screenshot is None:
-                log.error("Failed to capture window screenshot")
                 attempts += 1
                 continue
-
-            window_width = screenshot.shape[1]
+                
             window_height = screenshot.shape[0]
-
-            # Card dimensions and positioning relative to window
-            card_width = 350
-            gap = 50
-            first_card_left = (window_width // 2) - 575  # Adjust based on window screenshot width
-
-            # Define regions within the screenshot image
+            window_width = screenshot.shape[1]
+            
+            # Dynamic card dimensions
+            card_width = int(window_width * 0.18)
+            gap = int(window_width * 0.03)
+            first_card_left = (window_width // 2) - int((card_width + gap) * 1.45)
+            
+            # Define card regions
             regions = [
                 (first_card_left, 0, card_width, window_height),
                 (first_card_left + card_width + gap, 0, card_width, window_height),
                 (first_card_left + 2*(card_width + gap), 0, card_width, window_height)
             ]
-
+            
             found_upgrades = []
-            detected_positions = set()
-
+            
             for position, (x, y, w, h) in enumerate(regions):
                 try:
-                    # Adjust region to stay within screenshot bounds
-                    x = max(0, x)
-                    y = max(0, y)
-                    w = min(w, window_width - x)
-                    h = min(h, window_height - y)
-
-                    # Crop the region from the screenshot
-                    card_image = screenshot[y:y+h, x:x+w]
-
+                    # Crop card region
+                    card_img = screenshot[y:y+h, x:x+w]
+                    
+                    # Check each upgrade type
                     for upgrade in UPGRADE_PRIORITY:
-                        template_path = get_template_path(upgrade)
-                        template = cv2.imread(template_path)
+                        template = cv2.imread(get_template_path(upgrade))
                         if template is None:
-                            if DEBUG:
-                                log.warning(f"Template not found: {template_path}")
                             continue
-
-                        res = cv2.matchTemplate(card_image, template, cv2.TM_CCOEFF_NORMED)
+                            
+                        # Scale template to window size
+                        scaled_template = scale_to_window(template, window_height)
+                        
+                        # Match template
+                        res = cv2.matchTemplate(card_img, scaled_template, cv2.TM_CCOEFF_NORMED)
                         _, confidence, _, _ = cv2.minMaxLoc(res)
-
+                        
                         if confidence >= CONFIDENCE_THRESHOLD:
-                            upgrade_name = os.path.basename(upgrade)
-                            is_percent = False
-
-                            if upgrade_name in ["atk.png", "health.png"]:
-                                if DEBUG:
-                                    log.debug(f"Running percent check for {upgrade_name} at pos {position}")
-                                is_percent = is_percent_upgrade(card_image, position)
-                                if DEBUG:
-                                    log.debug(f"Percent check result: {is_percent}")
-
-                            rarity = get_rarity_from_color(card_image, position)
+                            # Found a match!
+                            rarity = get_rarity_from_color(card_img, position)
+                            is_percent = is_percent_upgrade(card_img, position)
+                            
                             found_upgrades.append({
-                                'upgrade': upgrade_name,
+                                'upgrade': upgrade.replace('.png', ''),  # Clean name
+                                'original_upgrade': upgrade,             # Original filename
                                 'position': position,
                                 'rarity': rarity,
                                 'confidence': confidence,
-                                'is_percent': is_percent,
-                                'original_upgrade': upgrade_name
+                                'is_percent': is_percent
                             })
-                            detected_positions.add(position)
                             break
-
+                            
                 except Exception as e:
-                    if DEBUG:
-                        log.error(f"Error scanning position {position}: {str(e)}")
-
-            # Decision logic remains the same
-            if len(detected_positions) == 3:
+                    log.error(f"Card scan error: {str(e)}")
+            
+            if found_upgrades:
                 return found_upgrades
-            elif attempts == max_attempts - 1:
-                return last_results if last_results else found_upgrades
-            else:
-                if DEBUG:
-                    missing = 3 - len(detected_positions)
-                    log.warning(f"Only detected {len(detected_positions)} upgrades (missing {missing}), retrying...")
-                time.sleep(0.3)
-                attempts += 1
-
+                
+            attempts += 1
+            time.sleep(0.5)
+            
         except Exception as e:
             log.error(f"Scan error: {str(e)}")
             attempts += 1
-            time.sleep(1)
+            
+    return []
 
-    return last_results if last_results else []
-
-def get_rarity_from_color(image, position):
+def get_rarity_from_color(card_img, position):
     try:
-        height, width = image.shape[:2]
+        height, width = card_img.shape[:2]
         
-        # Fixed X position
-        scan_x = 310
-        
-        # Fixed Y position
-        y_base = 605
+        # Dynamic rarity color detection
+        scan_x = int(width * 0.9)
+        y_base = int(height * 0.57)
         
         # Sample width 
         sample_width = 10
@@ -352,7 +378,7 @@ def get_rarity_from_color(image, position):
             scan_x = width - sample_width - 1
         
         # Define the scan region (5px tall, sample_width px wide)
-        sample_region = image[
+        sample_region = card_img[
             y_base - 2 : y_base + 3,
             scan_x : scan_x + sample_width
         ]
@@ -383,44 +409,30 @@ def get_rarity_from_color(image, position):
         log.error(f"Rarity detection error: {str(e)}")
         return "Unknown"
 
-def is_percent_upgrade(screenshot, position):
-    """Check if the upgrade has a percent symbol using template matching"""
+def is_percent_upgrade(card_img, position):
     try:
-        # Load the percent symbol template
-        percent_path = os.path.join(IMAGE_FOLDER, 'percent.png')
-        percent_template = cv2.imread(get_template_path("percent.png"))
-        if percent_template is None:
-            log.error(f"ERROR: Could not load percent template at {percent_path}")
+        template = cv2.imread(get_template_path("percent.png"))
+        if template is None:
             return False
-
-        height, width = screenshot.shape[:2]
+            
+        # Scale template
+        scaled_template = scale_to_window(template, card_img.shape[0])
         
-        # Vertical region (same for all positions)
-        y_start = height // 2 + 20  # Start slightly below middle
-        y_end = height * 2 // 3 + 40  # End lower down
+        # Match template
+        res = cv2.matchTemplate(card_img, scaled_template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, _ = cv2.minMaxLoc(res)
         
-        # Position-specific horizontal regions - now showing full card width
-        if position == 0:            # Left upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
-        elif position == 2:          # Right upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
-        else:                        # Middle upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
-
-        search_region = screenshot[y_start:y_end, x_start:x_end]
-        
-        # Perform template matching on the full card region
-        res = cv2.matchTemplate(screenshot, percent_template, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-        
-        if DEBUG:
-            log.debug(f"Percent check - Max confidence: {max_val:.2f} at {max_loc}")
-
-        return max_val > 0.7  # Lower threshold slightly
-        
+        # Debug
+        if DEBUG and confidence > 0.5:
+            debug_img = card_img.copy()
+            h, w = scaled_template.shape[:2]
+            cv2.rectangle(debug_img,
+                         (0, 0),
+                         (w, h),
+                         (0, 255, 0) if confidence > 0.7 else (0, 0, 255), 2)
+            cv2.imwrite(f"debug/percent_{position}.png", debug_img)
+            
+        return confidence > 0.7
     except Exception as e:
         log.error(f"Percent check error: {str(e)}")
         return False
@@ -467,14 +479,10 @@ def select_best_upgrade(upgrades):
         else:
             group = 1  # Low priority
 
-        # For percent upgrades, boost priority within their group
-        percent_boost = 0 if upgrade.get('is_percent', False) else 1
-
         return (
-            group,          # Primary group
-            percent_boost,  # Percent gets priority within group
-            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first
-            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority
+            group,          # Primary group (high/low priority)
+            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first within group
+            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority order
         )
 
     valid_upgrades.sort(key=get_sort_key)
@@ -566,8 +574,11 @@ def detect_victory():
         template = cv2.imread(get_template_path(VICTORY_TEMPLATE))
         if template is None:
             return False
+        
+        resized_screen = resize_to_template(screenshot, template)
+        res = cv2.matchTemplate(resized_screen, template, cv2.TM_CCOEFF_NORMED)
             
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        #res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
         _, confidence, _, _ = cv2.minMaxLoc(res)
         
         time.sleep(2) # Wait for results to load
