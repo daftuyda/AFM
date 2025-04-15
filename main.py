@@ -12,6 +12,8 @@ import platform
 import ctypes
 import logging
 import mss
+import easyocr
+import re
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
@@ -26,6 +28,9 @@ DEFAULT_CONFIG = {
     "webhook_url": "",
     "mode": "auto",
     "money_mode": False,
+    "easyocr_gpu": False,
+    "wave_upgrade_delay_start": 120,
+    "wave_upgrade_rounds": [1, 6],
     "button_delay": 0.2,
     "high_priority": [
         "regen",
@@ -74,6 +79,8 @@ HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_
 LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
 UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 MONEY_MODE = config.get("money_mode", False)
+DELAY_START = config.get("wave_upgrade_delay_start", 150)
+ALLOWED_ROUNDS = config.get("wave_upgrade_rounds", [1, 6])
 
 MODE = config.get("mode", "auto")
 
@@ -92,6 +99,8 @@ is_running = False
 is_paused = False
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
+last_upgraded_wave = None
+last_known_wave = None
 
 IMAGE_FOLDER = "images"
 
@@ -237,6 +246,70 @@ def get_window_screenshot(window):
             
     except Exception as e:
         log.error(f"Window capture failed: {str(e)}")
+        return None
+
+USE_GPU = config.get("easyocr_gpu", False)
+reader = easyocr.Reader(['en'], gpu=USE_GPU)
+
+def get_wave_region(window):
+    return {
+        "top": window.top + int(window.height * 0),
+        "left": window.left + int(window.width * 0.32), # Not ideal since only works in 1080p
+        "width": int(window.width * 0.07),
+        "height": int(window.height * 0.09)
+    }
+
+def preprocess_wave_image(image):
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Resize (scaling up helps OCR)
+    scale_factor = 5
+    gray = cv2.resize(gray, (image.shape[1]*scale_factor, image.shape[0]*scale_factor))
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Adaptive thresholding to highlight digits
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 15, 7)
+
+    return thresh
+
+def extract_wave_number(window):
+    global last_known_wave
+    region = get_wave_region(window)
+    with mss.mss() as sct:
+        wave_img = np.array(sct.grab(region))
+        processed = preprocess_wave_image(wave_img)
+
+        results = reader.readtext(processed, detail=1)
+        best_guess = None
+
+        for _, text, conf in results:
+            clean = text.replace(" ", "").upper()
+            match = re.search(r'\d{2,4}', clean)
+            if match:
+                digits = match.group(0)
+                if digits.isdigit():
+                    detected_wave = int(digits)
+                    # Heuristic: assume valid if it's near expected range
+                    if last_known_wave is None or detected_wave >= last_known_wave:
+                        best_guess = detected_wave
+                        break
+
+        if best_guess is not None:
+            last_known_wave = best_guess
+            return best_guess
+
+        # If OCR failed, assume it's the next round
+        if last_known_wave is not None:
+            last_known_wave += 1
+            if DEBUG:
+                log.debug(f"Assuming wave {last_known_wave} based on last known wave")
+            return last_known_wave
+
+        log.warning("No wave detected and no fallback available.")
         return None
 
 def resize_to_template(screenshot, template):
@@ -842,7 +915,7 @@ def manual_mode_loop():
         time.sleep(0.05)
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused
+    global run_start_time, victory_detected, is_running, is_paused, last_upgraded_wave, last_known_wave
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Mode: {MODE.capitalize()} Scan | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -898,19 +971,42 @@ def main_loop():
                 
             # Upgrade scanning
             if current_time - last_scan > SCAN_INTERVAL:
-                window = get_roblox_window()  # Get window without focusing
+                window = get_roblox_window()
                 if window:
                     upgrades = scan_for_upgrades()
                     if upgrades:
-                        if focus_roblox_window():  # Only focus when we have upgrades to select
-                            select_best_upgrade(upgrades)
-                            last_scan = time.time()
+                        current_wave = extract_wave_number(window)
+                        if current_wave:
+                            if DEBUG:
+                                log.info(f"Current wave: {current_wave}")
+
+                            # Check upgrade condition based on wave
+                            if current_wave < DELAY_START or (current_wave % 10) in ALLOWED_ROUNDS:
+                                if last_upgraded_wave != current_wave:
+                                    if focus_roblox_window():
+                                        if select_best_upgrade(upgrades):
+                                            last_upgraded_wave = current_wave  # Record this wave
+                                            log.info(f"Upgrade executed on wave {current_wave}")
+                                        else:
+                                            log.info("No upgrade selected.")
+                                        last_scan = time.time()
+                                    else:
+                                        last_scan = time.time() + 2
+                                else:
+                                    if DEBUG:
+                                        log.info(f"Already upgraded on wave {current_wave}. Skipping.")
+                                    last_scan = time.time()
+                            else:
+                                if DEBUG:
+                                    log.info(f"Upgrade delay active for wave {current_wave}")
+                                last_scan = time.time()
                         else:
-                            last_scan = time.time() + 2
+                            log.debug("Could not read wave number — skipping upgrade.")
+                            last_scan = time.time()
                     else:
                         if DEBUG:
-                            log.debug("No upgrades found, waiting...")
-                        last_scan = time.time() + 2
+                            log.info("No upgrades found.")
+                        last_scan = time.time()
                 else:
                     last_scan = time.time() + 1
         else:
