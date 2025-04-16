@@ -422,28 +422,41 @@ def get_rarity_from_color(card_img, position):
 
 def is_percent_upgrade(card_img, position):
     try:
-        template = cv2.imread(get_template_path("percent.png"))
-        if template is None:
-            return False
-            
-        # Scale template
-        scaled_template = scale_to_window(template, card_img.shape[0])
-        
-        # Match template
-        res = cv2.matchTemplate(card_img, scaled_template, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = cv2.minMaxLoc(res)
-        
-        # Debug
-        if DEBUG and confidence > 0.5:
-            debug_img = card_img.copy()
-            h, w = scaled_template.shape[:2]
-            cv2.rectangle(debug_img,
-                         (0, 0),
-                         (w, h),
-                         (0, 255, 0) if confidence > 0.7 else (0, 0, 255), 2)
-            cv2.imwrite(f"debug/percent_{position}.png", debug_img)
-            
-        return confidence > 0.7
+        # Check first percent template
+        template1_path = get_template_path("percent.png")
+        if os.path.exists(template1_path):
+            template1 = cv2.imread(template1_path)
+            if template1 is not None:
+                scaled_template1 = scale_to_window(template1, card_img.shape[0])
+                res1 = cv2.matchTemplate(card_img, scaled_template1, cv2.TM_CCOEFF_NORMED)
+                _, confidence1, _, _ = cv2.minMaxLoc(res1)
+                if confidence1 > 0.7:
+                    if DEBUG:
+                        log.debug(f"Percent detected (template1) at position {position} with confidence {confidence1:.2f}")
+                    return True
+
+        # Check second percent template only if file exists
+        template2_path = get_template_path("percent2.png")
+        if os.path.exists(template2_path):
+            template2 = cv2.imread(template2_path)
+            if template2 is not None:
+                scaled_template2 = scale_to_window(template2, card_img.shape[0])
+                res2 = cv2.matchTemplate(card_img, scaled_template2, cv2.TM_CCOEFF_NORMED)
+                _, confidence2, _, _ = cv2.minMaxLoc(res2)
+                if confidence2 > 0.7:
+                    if DEBUG:
+                        log.debug(f"Percent detected (template2) at position {position} with confidence {confidence2:.2f}")
+                    return True
+        elif DEBUG:
+            log.debug("percent2.png not found, skipping check")
+
+        if DEBUG:
+            conf1 = confidence1 if 'confidence1' in locals() else 'N/A'
+            conf2 = confidence2 if 'confidence2' in locals() else 'N/A'
+            log.debug(f"Percent check results - Template1: {conf1}, Template2: {conf2}")
+
+        return False
+
     except Exception as e:
         log.error(f"Percent check error: {str(e)}")
         return False
