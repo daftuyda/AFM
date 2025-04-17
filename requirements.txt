@@ -7,3 +7,4 @@ PyGetWindow
 Requests
 Pillow
 mss
+easyocr
