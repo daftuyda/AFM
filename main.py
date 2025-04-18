@@ -21,6 +21,7 @@ from collections import defaultdict
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
     "maximize_window": True,
+    "auto_reconnect": True,
     "scan_interval": 5,
     "start_key": "F6",
     "pause_key": "F7",
@@ -47,6 +48,9 @@ def prompt_config():
     
     response = input(f"Maximize window? [Y/n]: ").strip().lower()
     config["maximize_window"] = False if response == "n" else True
+    
+    response = input(f"Enable auto-reconnect? [Y/n]: ").strip().lower()
+    config["auto_reconnect"] = False if response == "n" else True
     
     response = input(f"Scan interval (default: {DEFAULT_CONFIG['scan_interval']}): ").strip()
     if response:
@@ -107,6 +111,7 @@ def add_png_suffix(items):
 
 ULTRAWIDE_MODE = config.get("ultrawide_mode", False)
 MAXIMIZE_WINDOW = config.get("maximize_window", True)
+AUTO_RECONNECT = config.get("auto_reconnect", True)
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
 BUTTON_DELAY = config.get("button_delay", 0.2)
@@ -241,6 +246,9 @@ class DisconnectionWatcherThread(threading.Thread):
             except Exception as e:
                 log.error(f"Disconnection watcher error: {str(e)}")
                 self.rejoining = False
+                
+    def stop(self):
+        self.running = False
 
 def setup_logging():
     with open('afm_macro.log', 'w'):
@@ -441,7 +449,7 @@ def get_rarity_from_color(card_img, position):
         
         # Dynamic rarity color detection
         scan_x = int(width * 0.9)
-        y_base = int(height * 0.57)
+        y_base = int(height * 0.56)
         
         # Sample width 
         sample_width = 10
@@ -585,7 +593,8 @@ def select_best_upgrade(upgrades):
                 -RARITY_ORDER.index(upgrade['rarity']),
                 UPGRADE_PRIORITY.index(upgrade['original_upgrade'])
             )
-        valid_upgrades.sort(key=get_sort_key)
+        if len(valid_upgrades) > 1:
+            valid_upgrades.sort(key=get_sort_key)
 
     if not MONEY_MODE:
         def get_sort_key(upgrade):
@@ -600,7 +609,8 @@ def select_best_upgrade(upgrades):
                 UPGRADE_PRIORITY.index(upgrade['original_upgrade'])
             )
 
-        valid_upgrades.sort(key=get_sort_key)
+        if len(valid_upgrades) > 1:
+            valid_upgrades.sort(key=get_sort_key)
 
     if DEBUG:
         log.debug("Valid upgrades sorted:")
@@ -622,7 +632,7 @@ def select_best_upgrade(upgrades):
 
     return False
 
-def toggle_ui_and_confirm(window=None, max_attempts=2):
+def toggle_ui_and_confirm(window=None, max_attempts=3):
     if not window:
         window = get_roblox_window()
         if not window:
@@ -643,7 +653,7 @@ def toggle_ui_and_confirm(window=None, max_attempts=2):
         pydirectinput.keyDown(UI_TOGGLE_KEY) # Press the UI toggle key
         time.sleep(BUTTON_DELAY / 2)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(0.6) # Give UI time to appear
+        time.sleep(1.2 if attempt == 0 else 1) # Wait longer on first attempt
 
         screenshot = get_window_screenshot(window)
         if screenshot is None:
@@ -656,7 +666,7 @@ def toggle_ui_and_confirm(window=None, max_attempts=2):
         if DEBUG:
             log.debug(f"UI box detection attempt {attempt + 1}: confidence={confidence:.2f}")
 
-        if confidence >= 0.7:
+        if confidence >= 0.6:
             return True
 
     log.warning("UI nav box not detected after toggling UI key.")
@@ -804,7 +814,7 @@ def generate_upgrade_summary():
 
 def upload_to_discord(screenshot, run_time):
     try:
-        _, img_encoded = cv2.imencode('.png', screenshot)
+        _, img_encoded = cv2.imencode('.jpg', screenshot, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         img_bytes = BytesIO(img_encoded.tobytes())
         
         minutes, seconds = divmod(run_time, 60)
@@ -1310,10 +1320,13 @@ def main_loop():
     # === Start Threads ===
     upgrade_thread = UpgradeScannerThread()
     victory_thread = VictoryCheckerThread()
-    disconnect_thread = DisconnectionWatcherThread()
     upgrade_thread.start()
     victory_thread.start()
-    disconnect_thread.start()
+    
+    disconnect_thread = None
+    if AUTO_RECONNECT:
+        disconnect_thread = DisconnectionWatcherThread()
+        disconnect_thread.start()
     
     try:
         while True:
@@ -1350,7 +1363,13 @@ def main_loop():
     finally: # Ensure threads are stopped when loop ends
         upgrade_thread.stop()
         victory_thread.stop()
-        disconnect_thread.stop()
+        
+        upgrade_thread.join(timeout=5)
+        victory_thread.join(timeout=5)
+        
+        if disconnect_thread:
+            disconnect_thread.stop()
+            disconnect_thread.join(timeout=5)
 
 if __name__ == "__main__":
     main_loop()

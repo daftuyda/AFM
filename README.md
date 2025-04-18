@@ -19,7 +19,7 @@
  Press the `start_key` to scan for upgrades.
  This mode will not automatically scan for upgrades but will scan for the victory screen.
 
-## Keybinds
+## Default Keybinds
 | Key | Function     |
 |-----|--------------|
 | F6  | Start        |
@@ -28,18 +28,22 @@
 
 ## Config
 
-| Config        | Function                                                          |
-|---------------|-------------------------------------------------------------------|
-| auto_start    | Enables the script automatically starting when run. (True/False)  |
-| scan_interval | How often the window is scanned for upgrades. (Number in seconds) |
-| start_key     | Key that controls the script starting or controls manual mode.    |
-| pause_key     | Key that controls the script pausing/resuming.                    |
-| stop_key      | Key that stops and quits the script.                              |
-| button_delay  | Delay of the navigation speed. (Number in seconds)                |
-| webhook_url   | Discord webhook URL (Optional)                                    |
-| mode          | Controls what mode the script runs in (auto/manual)               |
-| money_mode    | Will always choose boss rewards upgrade if avaliable (True/False) |
-| debug         | Enables debug messages to the console (True/False)                |
+| Config          | Function                                                            |
+|-----------------|---------------------------------------------------------------------|
+| ultrawide_mode  | Enables support for ultra-wide (21:9) displays. (True/False)        |
+| maximize_window | Automatically maximizes window for better detection. (True/False)   |
+| auto_reconnect  | Will start a solo run if disconnected. (True/False)                 |
+| auto_start      | Enables the script automatically starting when run. (True/False)    |
+| scan_interval   | How often the window is scanned for upgrades. (Number in seconds)   |
+| start_key       | Key that controls the script starting or controls manual mode.      |
+| pause_key       | Key that controls the script pausing/resuming.                      |
+| stop_key        | Key that stops and quits the script.                                |
+| button_delay    | Delay of the navigation speed. (Number in seconds)                  |
+| webhook_url     | Discord webhook URL (Optional)                                      |
+| mode            | Controls what mode the script runs in (auto/manual)                 |
+| high_priority   | Upgrades in this list will be chosen first.                         |
+| low_priority    | Upgrades in list will be chosen if no high priority upgrades found. |
+| debug           | Enables debug messages to the console (True/False)                  |
 
 ## How it works
  This macro will scann the screen every X seconds that is set as the scan interval.
@@ -52,10 +56,6 @@
  It uses CV to scan for upgrades.
  Calculates logic on the best upgrade.
  Then navigates to them using roblox in-game navigation
-
-## Limitations
- This is currently only tested on 1080p and will probably mess up on anything else.
- Which also includes the window not being in fullscreen.
 
 # Upgrade Logic
  (REGEN > BOSS > DISCOUNT > ATK% > HEALTH% > SUMMON) > LUCK% > SPEED% > HEALING% > JADE
