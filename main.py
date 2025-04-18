@@ -13,10 +13,15 @@ import ctypes
 import logging
 import mss
 import threading
+import tempfile
+import subprocess
+import sys
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
+
+__version__ = "1.3.1"
 
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
@@ -33,6 +38,7 @@ DEFAULT_CONFIG = {
     "button_delay": 0.2,
     "high_priority": ["regen","boss","discount","atk","health","units"],
     "low_priority": ["luck","speed","heal","jade","enemy"],
+    "auto_updates": False,
     "debug": False
 }
 
@@ -94,6 +100,9 @@ def prompt_config():
     response = input(f"Debug mode? [y/N]: ").strip().lower()
     config["debug"] = response == "y"
     
+    response = input(f"Automatically update? [y/N]: ").strip().lower()
+    config["auto_updates"] = response == "y"
+    
     print("\n=== Configuration Complete ===")
     print("High/low priority upgrades use defaults. Edit the code to modify them.\n")
     return config
@@ -125,6 +134,7 @@ HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_
 LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
 UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 DEBUG = config.get("debug", False)
+AUTO_UPDATES = config.get("auto_updates", True)
 
 IMAGE_FOLDER = "ultrawide" if ULTRAWIDE_MODE else "images"
 CONFIDENCE_THRESHOLD = 0.8
@@ -1293,6 +1303,69 @@ def manual_mode_loop():
             time.sleep(0.2)
             
         time.sleep(0.1)
+
+def check_for_update():
+    try:
+        VERSION_URL = "https://raw.githubusercontent.com/daftuyda/AFM/refs/heads/main/version.txt"
+        EXE_URL = "https://github.com/daftuyda/AFM/releases/latest/download/AFM.exe"
+        CURRENT_VERSION = __version__
+        CURRENT_EXE = sys.argv[0]
+
+        res = requests.get(VERSION_URL)
+        if res.status_code != 200:
+            log.warning("Could not fetch version info.")
+            return
+
+        latest_version = res.text.strip()
+        if latest_version == CURRENT_VERSION:
+            log.debug("You are on the latest version.")
+            return
+
+        if not AUTO_UPDATES:
+            log.info("Update available, but auto_updates is disabled.")
+            return
+
+        print(f"\n🚨 Update found! {CURRENT_VERSION} → {latest_version}")
+        print("Download update? (Y/n), defaulting to skip in 5 seconds...\n")
+
+        answer = None
+        def get_input():
+            nonlocal answer
+            answer = input("Update now? [y/N]: ").strip().lower()
+
+        thread = threading.Thread(target=get_input)
+        thread.start()
+        thread.join(timeout=5)
+
+        if answer != 'y':
+            print("⏩ Skipping update.")
+            return
+
+        print("⬇️ Downloading update...")
+
+        update = requests.get(EXE_URL, stream=True)
+        if update.status_code != 200:
+            print("❌ Failed to download update.")
+            return
+
+        # Save to temp file
+        temp_exe = tempfile.NamedTemporaryFile(delete=False, suffix=".exe")
+        for chunk in update.iter_content(chunk_size=8192):
+            temp_exe.write(chunk)
+        temp_exe.close()
+
+        print("✅ Update downloaded. Restarting...")
+
+        # Launch updater
+        subprocess.Popen([
+            "cmd", "/c",
+            f"timeout 1 > NUL && move /Y \"{temp_exe.name}\" \"{CURRENT_EXE}\" && start \"\" \"{CURRENT_EXE}\""
+        ], shell=True)
+
+        exit()
+
+    except Exception as e:
+        log.error(f"Update check failed: {e}")
 
 def main_loop():
     global run_start_time, victory_detected, is_running, is_paused
