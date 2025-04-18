@@ -2,7 +2,7 @@ name: Build and Release AFM Macro
 
 on:
   push:
-    branches: [ master ]  # Adjust to your main branch
+    branches: [ main ]
 
 jobs:
   build-windows:
