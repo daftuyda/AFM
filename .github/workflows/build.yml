@@ -14,7 +14,9 @@ jobs:
 
       - name: Set version from date + short SHA
         id: version
-        run: echo "version=v$(date +'%Y%m%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        run: |
+          echo "version=v$(date +'%Y%m%d')-$(git rev-parse --short HEAD)" >> version.txt
+          echo "VERSION=$(type version.txt)" >> $env:GITHUB_ENV
 
       - name: Install Python
         uses: actions/setup-python@v4
@@ -32,7 +34,7 @@ jobs:
 
       - name: Create distribution zip
         run: |
-          mkdir -p package
+          mkdir package
           cp dist/AFM.exe package/
           cp -r images package/
           cp -r ultrawide package/
@@ -44,8 +46,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          release_name: AFM Endless Macro - ${{ steps.version.outputs.version }}
+          tag_name: ${{ env.VERSION }}
+          release_name: AFM Endless Macro - ${{ env.VERSION }}
           body: |
             Automated build from latest commit.
           draft: false
