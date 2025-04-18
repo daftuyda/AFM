@@ -1357,12 +1357,10 @@ def check_for_update():
         print("✅ Update downloaded. Restarting...")
 
         # Launch updater
-        subprocess.Popen([
-            "cmd", "/c",
-            f"timeout 1 > NUL && move /Y \"{temp_exe.name}\" \"{CURRENT_EXE}\" && start \"\" \"{CURRENT_EXE}\""
-        ], shell=True)
+        cmd = f'timeout 1 > NUL && move /Y "{temp_exe.name}" "{CURRENT_EXE}" && start "" "{CURRENT_EXE}"'
+        subprocess.Popen(cmd, shell=True)
 
-        exit()
+        sys.exit()
 
     except Exception as e:
         log.error(f"Update check failed: {e}")
@@ -1445,4 +1443,5 @@ def main_loop():
             disconnect_thread.join(timeout=5)
 
 if __name__ == "__main__":
+    check_for_update()
     main_loop()

@@ -12,11 +12,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set version from date + short SHA
+      - name: Read version from file
         id: version
         run: |
-          echo "version=v$(date +'%Y%m%d')-$(git rev-parse --short HEAD)" >> version.txt
-          echo "VERSION=$(type version.txt)" >> $env:GITHUB_ENV
+          echo "VERSION=$(Get-Content version.txt)" >> $env:GITHUB_ENV
 
       - name: Install Python
         uses: actions/setup-python@v4
@@ -49,7 +48,7 @@ jobs:
           tag_name: ${{ env.VERSION }}
           release_name: AFM Endless Macro - ${{ env.VERSION }}
           body: |
-            Automated build from latest commit.
+            Release version ${{ env.VERSION }}
           draft: false
           prerelease: false
 
