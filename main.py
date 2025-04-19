@@ -22,7 +22,7 @@ from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
@@ -871,6 +871,87 @@ def get_current_wave_number(last_wave=None):
 
 def is_boss_round(wave):
     return wave % 5 == 0
+
+def get_current_gold_amount():
+    window = get_roblox_window()
+    if not window:
+        return None
+
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return None
+
+    gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+
+    # Estimate ROI for gold (top-right)
+    h, w = gray.shape
+    x = int(w * 1650 / 1920)
+    y = int(h * 45 / 1080)
+    roi_w = int(w * 200 / 1920)
+    roi_h = int(h * 35 / 1080)
+    roi = gray[y:y+roi_h, x:x+roi_w]
+
+    # Preprocess ROI for better OCR
+    roi = cv2.equalizeHist(roi)
+    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    _, roi = cv2.threshold(roi, 150, 255, cv2.THRESH_BINARY)
+
+    h_roi, w_roi = roi.shape
+    heatmap = np.zeros((h_roi, w_roi), dtype=np.float32)
+    digit_map = np.full((h_roi, w_roi), -1, dtype=np.int32)
+
+    for digit in reversed(range(10)):
+        template_path = os.path.join("numbers", f"{digit}.png")
+        template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+        if template is None:
+            continue
+
+        th, tw = template.shape
+        res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+
+        for y_res in range(res.shape[0]):
+            for x_res in range(res.shape[1]):
+                score = res[y_res, x_res]
+                if score > heatmap[y_res, x_res]:
+                    heatmap[y_res, x_res] = score
+                    digit_map[y_res, x_res] = digit
+
+    threshold = 0.5
+    matches = []
+    for y_scan in range(digit_map.shape[0]):
+        for x_scan in range(digit_map.shape[1]):
+            digit = digit_map[y_scan, x_scan]
+            score = heatmap[y_scan, x_scan]
+            if digit != -1 and score >= threshold:
+                matches.append((x_scan, digit, score))
+
+    if DEBUG:
+        heatmap_vis = (heatmap * 255).astype(np.uint8)
+        os.makedirs("debug", exist_ok=True)
+        cv2.imwrite("debug/gold_roi.png", roi)
+        cv2.imwrite("debug/gold_heatmap.png", heatmap_vis)
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda m: m[0])
+    filtered = []
+    last_x = -999
+    for x_pos, digit, score in matches:
+        if x_pos - last_x > 10:
+            filtered.append((x_pos, digit, score))
+            last_x = x_pos
+
+    digits = [str(d) for _, d, _ in filtered]
+
+    if DEBUG:
+        digit_debug = ", ".join([f"{d} ({c:.2f})" for (_, d, c) in filtered])
+        log.debug(f"Matched gold digits: [{digit_debug}]")
+
+    try:
+        return int("".join(digits))
+    except ValueError:
+        return None
 
 def detect_victory():
     global last_victory_time, victory_detected, run_start_time
