@@ -16,6 +16,7 @@ import threading
 import tempfile
 import subprocess
 import sys
+import random
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
@@ -27,6 +28,7 @@ DEFAULT_CONFIG = {
     "ultrawide_mode": False,
     "maximize_window": True,
     "auto_reconnect": True,
+    "afk_prevention": True,
     "scan_interval": 5,
     "start_key": "F6",
     "pause_key": "F7",
@@ -58,6 +60,9 @@ def prompt_config():
     
     response = input(f"Enable auto-reconnect? [Y/n]: ").strip().lower()
     config["auto_reconnect"] = False if response == "n" else True
+    
+    response = input(f"Enable AFK prevention (jump every 10-15 mins)? [Y/n]: ").strip().lower()
+    config["afk_prevention"] = False if response == "n" else True
     
     response = input(f"Scan interval (default: {DEFAULT_CONFIG['scan_interval']}): ").strip()
     if response:
@@ -91,6 +96,13 @@ def prompt_config():
     response = input(f"Money mode? [y/N]: ").strip().lower()
     config["money_mode"] = response == "y"
     
+    response = input(f"Wave threshold (default: {DEFAULT_CONFIG['wave_threshold']}): ").strip()
+    if response:
+        try:
+            config["wave_threshold"] = int(response)
+        except ValueError:
+            print("Invalid input. Using default.")
+    
     response = input(f"Button delay (default: {DEFAULT_CONFIG['button_delay']}): ").strip()
     if response:
         try:
@@ -122,6 +134,7 @@ def add_png_suffix(items):
 ULTRAWIDE_MODE = config.get("ultrawide_mode", False)
 MAXIMIZE_WINDOW = config.get("maximize_window", True)
 AUTO_RECONNECT = config.get("auto_reconnect", True)
+AFK_PREVENTION = config.get("afk_prevention", True)
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
 BUTTON_DELAY = config.get("button_delay", 0.2)
@@ -264,6 +277,24 @@ class DisconnectionWatcherThread(threading.Thread):
     def stop(self):
         self.running = False
 
+class AFKPreventionThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = False
+
+    def run(self):
+        self.running = True
+        while self.running:
+            if is_running and not is_paused:
+                log.debug("[AFK] Simulating jump")
+                pydirectinput.keyDown('space')
+                time.sleep(0.1)
+                pydirectinput.keyUp('space')
+            time.sleep(random.randint(600, 900))  # 10 to 15 mins
+
+    def stop(self):
+        self.running = False
+
 def setup_logging():
     with open('afm_macro.log', 'w'):
         pass
@@ -307,26 +338,33 @@ def focus_roblox_window():
 
 def get_roblox_window():
     try:
-        roblox_windows = gw.getWindowsWithTitle("Roblox")
-        if not roblox_windows:
+        candidates = gw.getWindowsWithTitle("Roblox")
+        best_window = None
+
+        for window in candidates:
+            w, h = window.width, window.height
+
+            try:
+                if window.isMinimized or window.width < 500 or window.height < 400:
+                    continue
+            except Exception as e:
+                log.debug(f"Skipping window due to error: {e}")
+                continue
+            if w < 500 or h < 400:  # Arbitrary sanity threshold
+                if DEBUG:
+                    log.debug(f"Skipping small window: {w}x{h} ({window.title})")
+                continue
+
+            best_window = window
+            break
+
+        if not best_window:
             if DEBUG:
-                log.warning("Roblox window not found")
+                log.warning("No valid Roblox window found.")
             return None
-            
-        window = roblox_windows[0]
-        
-        window.left = window._rect.left
-        window.top = window._rect.top
-        window.width = window._rect.width
-        window.height = window._rect.height
-        
-        if window.width < 100 or window.height < 100: # Verify window is visible and has reasonable dimensions
-            if DEBUG:
-                log.warning(f"Window too small: {window.width}x{window.height}")
-            return None
-            
-        return window
-        
+
+        return best_window
+
     except Exception as e:
         if DEBUG:
             log.error(f"Window detection error: {str(e)}")
@@ -446,6 +484,13 @@ def scan_for_upgrades(max_attempts=3):
                     log.error(f"Card scan error: {str(e)}")
             
             if found_upgrades:
+                unknown_count = sum(1 for u in found_upgrades if u['rarity'] == "Unknown")
+                if len(found_upgrades) < 3 or unknown_count > 0:
+                    if DEBUG:
+                        log.debug(f"Retrying scan: {len(found_upgrades)} upgrades found, {unknown_count} unknown rarities")
+                    attempts += 1
+                    time.sleep(0.6)
+                    continue
                 return found_upgrades
                 
             attempts += 1
@@ -492,7 +537,7 @@ def get_rarity_from_color(card_img, position):
                 if distance < 30:  # Early exit if very close match
                     break
         
-        return closest_match if min_distance < 50 else "Unknown"
+        return closest_match if min_distance < 60 else "Unknown" # Increase threshold for more leniency
         
     except Exception as e:
         log.error(f"Rarity detection error: {str(e)}")
@@ -667,7 +712,7 @@ def toggle_ui_and_confirm(window=None, max_attempts=3):
         pydirectinput.keyDown(UI_TOGGLE_KEY) # Press the UI toggle key
         time.sleep(BUTTON_DELAY / 2)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(1.2 if attempt == 0 else 1) # Wait longer on first attempt
+        time.sleep(1 if attempt == 0 else 0.8) # Wait longer on first attempt
 
         screenshot = get_window_screenshot(window)
         if screenshot is None:
@@ -742,13 +787,16 @@ def get_current_wave_number(last_wave=None):
 
     gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
 
-    # Dynamic ROI (adjust if needed)
     h, w = gray.shape
-    x = int(w * 675 / 1920)
+    x = int(w * 680 / 1920)
     y = int(h * 45 / 1080)
     roi_w = int(w * 70 / 1920)
     roi_h = int(h * 35 / 1080)
     roi = gray[y:y+roi_h, x:x+roi_w]
+
+    roi = cv2.equalizeHist(roi)
+    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    _, roi = cv2.threshold(roi, 150, 255, cv2.THRESH_BINARY)
 
     # Digit matching logic
     h_roi, w_roi = roi.shape
@@ -757,7 +805,7 @@ def get_current_wave_number(last_wave=None):
 
     for digit in reversed(range(10)):  # Try 9 down to 0
         template_path = os.path.join("numbers", f"{digit}.png")
-        template = cv2.imread(template_path, 0)
+        template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
         if template is None:
             continue
 
@@ -772,7 +820,7 @@ def get_current_wave_number(last_wave=None):
                     digit_map[y_res, x_res] = digit
 
     # Collect best matches above threshold
-    threshold = 0.7
+    threshold = 0.65
     matches = []
     for y_scan in range(digit_map.shape[0]):
         for x_scan in range(digit_map.shape[1]):
@@ -785,7 +833,6 @@ def get_current_wave_number(last_wave=None):
     if not matches:
         return None
 
-    # Sort by x-position
     matches.sort(key=lambda m: m[0])
 
     # Filter overlapping digits
@@ -796,12 +843,11 @@ def get_current_wave_number(last_wave=None):
             filtered.append((x_pos, digit, score))
             last_x = x_pos
 
-    # Extract digits and confidence
     digits = [str(d) for _, d, _ in filtered]
 
     if DEBUG:
-        digit_debug = ", ".join([f"{d} ({c:.2f})" for (_, d, c) in filtered])
-        log.debug(f"Matched digits: [{digit_debug}]")
+        digits_str = "".join([str(d) for (_, d, _) in filtered])
+        log.debug(f"Matched digits: {digits_str}")
 
     try:
         wave = int("".join(digits))
@@ -1493,6 +1539,11 @@ def main_loop():
     upgrade_thread.start()
     victory_thread.start()
     
+    afk_thread = None
+    if AFK_PREVENTION:
+        afk_thread = AFKPreventionThread()
+        afk_thread.start()
+    
     disconnect_thread = None
     if AUTO_RECONNECT:
         disconnect_thread = DisconnectionWatcherThread()
@@ -1557,9 +1608,15 @@ def main_loop():
     finally: # Ensure threads are stopped when loop ends
         upgrade_thread.stop()
         victory_thread.stop()
-        
+        afk_thread.stop()
+
         upgrade_thread.join(timeout=5)
         victory_thread.join(timeout=5)
+        afk_thread.join(timeout=5)
+        
+        if afk_thread:
+            afk_thread.stop()
+            afk_thread.join(timeout=5)
         
         if disconnect_thread:
             disconnect_thread.stop()
