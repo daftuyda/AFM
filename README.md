@@ -1,4 +1,4 @@
-# [AFM - Latest Release](https://github.com/YOUR_USERNAME/YOUR_REPO/releases/latest/download/AFM.zip)
+# [AFM - Latest Release](https://github.com/daftuyda/AFM/releases/latest/download/AFM.zip)
  [![](https://dcbadge.limes.pink/api/server/https://discord.gg/BzVmGXQ22e)](https://discord.gg/BzVmGXQ22e)
  Join the support server to stay up to date and to report any issues you have.
  
@@ -33,16 +33,19 @@
 | ultrawide_mode  | Enables support for ultra-wide (21:9) displays. (True/False)        |
 | maximize_window | Automatically maximizes window for better detection. (True/False)   |
 | auto_reconnect  | Will start a solo run if disconnected. (True/False)                 |
-| auto_start      | Enables the script automatically starting when run. (True/False)    |
 | scan_interval   | How often the window is scanned for upgrades. (Number in seconds)   |
 | start_key       | Key that controls the script starting or controls manual mode.      |
 | pause_key       | Key that controls the script pausing/resuming.                      |
 | stop_key        | Key that stops and quits the script.                                |
-| button_delay    | Delay of the navigation speed. (Number in seconds)                  |
+| auto_start      | Enables the script automatically starting when run. (True/False)    |
 | webhook_url     | Discord webhook URL (Optional)                                      |
 | mode            | Controls what mode the script runs in (auto/manual)                 |
+| money_mode      | Prioritizes reward increase upgrades. (True/False)                  |
+| wave_threshold  | Will hold upgrades for each boss wave past the set wave (Number)    |
+| button_delay    | Delay of the navigation speed. (Number in seconds)                  |
 | high_priority   | Upgrades in this list will be chosen first.                         |
 | low_priority    | Upgrades in list will be chosen if no high priority upgrades found. |
+| auto_updates    | Enables dialogue on start up if theres a new update (True/False)    |
 | debug           | Enables debug messages to the console (True/False)                  |
 
 ## How it works

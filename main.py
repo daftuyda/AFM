@@ -21,7 +21,7 @@ from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "webhook_url": "",
     "mode": "auto",
     "money_mode": False,
+    "wave_threshold": 120,
     "button_delay": 0.2,
     "high_priority": ["regen","boss","discount","atk","health","units"],
     "low_priority": ["luck","speed","heal","jade","enemy"],
@@ -129,6 +130,7 @@ PAUSE_KEY = config.get("pause_key", "f7").lower()
 STOP_KEY = config.get("stop_key", "f8").lower()
 DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 MONEY_MODE = config.get("money_mode", False)
+WAVE_THRESHOLD = config.get("wave_threshold", 120)
 MODE = config.get("mode", "auto")
 HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_priority"]))
 LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
@@ -146,12 +148,14 @@ KEY_HOLD_TIME = 0.1
 last_victory_time = 0
 run_start_time = 0
 last_disconnect_check = 0
+last_wave_number = 0
 victory_detected = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
+upgrade_allowed = True
 
 RARITY_COLORS = {(71, 99, 189): "Common", (190, 60, 238): "Epic", (238, 208, 60): "Legendary", (238, 60, 60): "Mythic"}
 
@@ -726,6 +730,101 @@ def record_upgrade_purchase(upgrade_name, rarity):
     upgrades_purchased[upgrade_name.replace('.png', '')][rarity] += 1
     if DEBUG:
         log.debug(f"Recorded purchase: {upgrade_name} ({rarity})")
+
+def get_current_wave_number(last_wave=None):
+    window = get_roblox_window()
+    if not window:
+        return None
+
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return None
+
+    gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+
+    # Dynamic ROI (adjust if needed)
+    h, w = gray.shape
+    x = int(w * 675 / 1920)
+    y = int(h * 45 / 1080)
+    roi_w = int(w * 70 / 1920)
+    roi_h = int(h * 35 / 1080)
+    roi = gray[y:y+roi_h, x:x+roi_w]
+
+    # Digit matching logic
+    h_roi, w_roi = roi.shape
+    heatmap = np.zeros((h_roi, w_roi), dtype=np.float32)
+    digit_map = np.full((h_roi, w_roi), -1, dtype=np.int32)
+
+    for digit in reversed(range(10)):  # Try 9 down to 0
+        template_path = os.path.join("numbers", f"{digit}.png")
+        template = cv2.imread(template_path, 0)
+        if template is None:
+            continue
+
+        th, tw = template.shape
+        res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+
+        for y_res in range(res.shape[0]):
+            for x_res in range(res.shape[1]):
+                score = res[y_res, x_res]
+                if score > heatmap[y_res, x_res]:
+                    heatmap[y_res, x_res] = score
+                    digit_map[y_res, x_res] = digit
+
+    # Collect best matches above threshold
+    threshold = 0.7
+    matches = []
+    for y_scan in range(digit_map.shape[0]):
+        for x_scan in range(digit_map.shape[1]):
+            digit = digit_map[y_scan, x_scan]
+            score = heatmap[y_scan, x_scan]
+
+            if digit != -1 and score >= threshold:
+                matches.append((x_scan, digit, score))
+
+    if not matches:
+        return None
+
+    # Sort by x-position
+    matches.sort(key=lambda m: m[0])
+
+    # Filter overlapping digits
+    filtered = []
+    last_x = -999
+    for x_pos, digit, score in matches:
+        if x_pos - last_x > 10:
+            filtered.append((x_pos, digit, score))
+            last_x = x_pos
+
+    # Extract digits and confidence
+    digits = [str(d) for _, d, _ in filtered]
+
+    if DEBUG:
+        digit_debug = ", ".join([f"{d} ({c:.2f})" for (_, d, c) in filtered])
+        log.debug(f"Matched digits: [{digit_debug}]")
+
+    try:
+        wave = int("".join(digits))
+
+        if last_wave is not None and wave < last_wave:
+            if DEBUG:
+                log.debug(f"Ignoring regressed wave number: {wave} < {last_wave}")
+
+            str_wave = str(wave)
+            if str_wave.endswith("0"):
+                for replacement in ["6", "8"]:
+                    guessed_wave = int(str_wave[:-1] + replacement)
+                    if guessed_wave > last_wave:
+                        log.warning(f"Wave misread detected. Replacing {wave} with guessed {guessed_wave}")
+                        return guessed_wave
+            return None  # Skip bad regression
+        return wave
+
+    except ValueError:
+        return None
+
+def is_boss_round(wave):
+    return wave % 5 == 0
 
 def detect_victory():
     global last_victory_time, victory_detected, run_start_time
@@ -1366,7 +1465,7 @@ def check_for_update():
         log.error(f"Update check failed: {e}")
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused
+    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Mode: {MODE.capitalize()} Scan | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -1426,8 +1525,32 @@ def main_loop():
 
                 upgrades = upgrade_thread.get_upgrades() # Pull upgrade scan result
                 if upgrades:
-                    if focus_roblox_window():
+                    wave = get_current_wave_number(last_wave=last_wave_number)
+
+                    if wave is None:
+                        if DEBUG:
+                            log.debug("Wave number not detected. Skipping upgrade.")
+                        continue
+
+                    last_wave_number = wave
+
+                    if wave < WAVE_THRESHOLD:
                         select_best_upgrade(upgrades)
+                        upgrade_allowed = True  # Always allow upgrades below threshold
+
+                    else:
+                        # Boss rounds every 5 waves (0 and 5); upgrade only once on wave % 5 == 1
+                        if wave % 5 == 1 and upgrade_allowed:
+                            log.info(f"Post-boss wave {wave}: upgrading once.")
+                            select_best_upgrade(upgrades)
+                            upgrade_allowed = False  # Lock upgrades until next boss
+
+                        elif wave % 5 in [0, 5]:
+                            upgrade_allowed = True  # Reset upgrade allowance on boss wave
+
+                        else:
+                            if DEBUG:
+                                log.debug(f"Holding upgrade at wave {wave} (waiting for next post-boss)")
 
             time.sleep(0.05)
 
