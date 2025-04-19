@@ -1077,7 +1077,7 @@ def upload_to_discord(screenshot, run_time):
         return False
 
 def restart_run():
-    global run_start_time, victory_detected, upgrades_purchased
+    global run_start_time, victory_detected, upgrades_purchased, last_wave_number
     
     log.debug("Attempting to restart run")
     try:
@@ -1105,6 +1105,7 @@ def restart_run():
         
         run_start_time = time.time()
         victory_detected = False
+        last_wave_number = 0
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
         return True
         
