@@ -37,6 +37,7 @@ jobs:
           cp dist/AFM.exe package/
           cp -r images package/
           cp -r ultrawide package/
+          cp -r numbers package/
           Compress-Archive -Path package/* -DestinationPath AFM.zip -Force
 
       - name: Create GitHub Release
