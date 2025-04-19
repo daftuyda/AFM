@@ -1659,10 +1659,13 @@ def main_loop():
                 if upgrades:
                     wave = get_current_wave_number(last_wave=last_wave_number)
 
-                    if wave is None and last_wave_number < WAVE_THRESHOLD:
-                        continue
-
-                    if wave is None:
+                    if wave is not None:
+                        last_wave_number = wave
+                    elif last_wave_number < WAVE_THRESHOLD:
+                        if DEBUG:
+                            log.debug("Wave number not detected, but continuing since under threshold.")
+                        wave = last_wave_number  # Use the last known wave
+                    else:
                         if DEBUG:
                             log.debug("Wave number not detected. Skipping upgrade.")
                         continue
