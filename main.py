@@ -17,18 +17,20 @@ import tempfile
 import subprocess
 import sys
 import random
+import gc
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
     "maximize_window": True,
     "auto_reconnect": True,
     "afk_prevention": True,
+    "gold_wave_tracking": False,
     "scan_interval": 5,
     "start_key": "F6",
     "pause_key": "F7",
@@ -63,6 +65,9 @@ def prompt_config():
     
     response = input(f"Enable AFK prevention (jump every 10-15 mins)? [Y/n]: ").strip().lower()
     config["afk_prevention"] = False if response == "n" else True
+    
+    response = input(f"Enable Gold and Wave Tracking? [y/N]: ").strip().lower()
+    config["gold_wave_tracking"] = response == "y"
     
     response = input(f"Scan interval (default: {DEFAULT_CONFIG['scan_interval']}): ").strip()
     if response:
@@ -135,6 +140,7 @@ ULTRAWIDE_MODE = config.get("ultrawide_mode", False)
 MAXIMIZE_WINDOW = config.get("maximize_window", True)
 AUTO_RECONNECT = config.get("auto_reconnect", True)
 AFK_PREVENTION = config.get("afk_prevention", True)
+GOLD_WAVE_TRACKING = config.get("gold_wave_tracking", False)
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
 BUTTON_DELAY = config.get("button_delay", 0.2)
@@ -160,8 +166,15 @@ KEY_HOLD_TIME = 0.1
 # State variables
 last_victory_time = 0
 run_start_time = 0
+last_upgrade_time = 0
 last_disconnect_check = 0
 last_wave_number = 0
+last_wave_gold_check = 0
+WAVE_GOLD_INTERVAL = SCAN_INTERVAL * 3
+last_wave_reset_time = 0
+WAVE_RESET_INTERVAL = 3 * 60
+last_ui_check = 0
+UI_CHECK_INTERVAL = 2
 victory_detected = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
@@ -169,6 +182,11 @@ is_paused = False
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
 upgrade_allowed = True
+post_boss_missed_upgrade = False
+grand_total_gold = 0
+gold_start = None
+gold_last = None
+gold_log = []
 
 RARITY_COLORS = {(71, 99, 189): "Common", (190, 60, 238): "Epic", (238, 208, 60): "Legendary", (238, 60, 60): "Mythic"}
 
@@ -209,6 +227,8 @@ class UpgradeScannerThread(threading.Thread):
                 upgrades = scan_for_upgrades()
                 with self.lock:
                     self.upgrades = upgrades
+                    
+                    detect_ui_elements_and_respond()
             time.sleep(SCAN_INTERVAL)
 
     def get_upgrades(self):
@@ -216,6 +236,70 @@ class UpgradeScannerThread(threading.Thread):
             upgrades = self.upgrades
             self.upgrades = None
         return upgrades
+
+    def stop(self):
+        self.running = False
+
+class UIDetectorThread(threading.Thread):
+    def __init__(self, interval=3):
+        super().__init__(daemon=True)
+        self.running = False
+        self.interval = interval
+
+    def run(self):
+        self.running = True
+        while self.running:
+            if is_running and not is_paused:
+                try:
+                    detect_ui_elements_and_respond()
+                except Exception as e:
+                    log.error(f"[UI Detection] Error: {e}")
+            time.sleep(self.interval)
+
+    def stop(self):
+        self.running = False
+
+class GoldWaveScannerThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = False
+
+    def run(self):
+        global last_wave_number, last_wave_gold_check, last_wave_reset_time, gold_start, gold_last
+
+        self.running = True
+        while self.running:
+            if is_running and not is_paused:
+                now = time.time()
+
+                # Wave regression reset logic
+                if now - last_wave_reset_time > WAVE_RESET_INTERVAL:
+                    if DEBUG:
+                        log.debug("[Wave] Resetting last_wave_number due to 3-min timeout.")
+                    last_wave_number = 0
+                    last_wave_reset_time = now
+
+                # Perform wave scan
+                scanned_wave = get_current_wave_number(last_wave=last_wave_number)
+                if scanned_wave is not None:
+                    if scanned_wave >= last_wave_number:
+                        last_wave_number = scanned_wave
+                        if DEBUG:
+                            log.debug(f"[WaveScan] Updated wave: {last_wave_number}")
+                else:
+                    if DEBUG:
+                        log.debug("[WaveScan] No valid wave read.")
+
+                # Perform gold scan
+                current_gold = get_current_gold_amount()
+                if current_gold is not None:
+                    if gold_start is None:
+                        gold_start = current_gold
+                    gold_last = current_gold
+                    if DEBUG:
+                        log.debug(f"[GoldScan] Current gold: {current_gold}")
+                                
+            time.sleep(15)
 
     def stop(self):
         self.running = False
@@ -710,7 +794,7 @@ def toggle_ui_and_confirm(window=None, max_attempts=3):
 
     for attempt in range(max_attempts):
         pydirectinput.keyDown(UI_TOGGLE_KEY) # Press the UI toggle key
-        time.sleep(BUTTON_DELAY / 2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(1 if attempt == 0 else 0.8) # Wait longer on first attempt
 
@@ -739,28 +823,28 @@ def navigate_to(position_index):
         toggle_ui_and_confirm()
         
         pydirectinput.keyDown('left')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('left')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('down')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('down')
         time.sleep(BUTTON_DELAY)
         
         for _ in range(position_index):
             pydirectinput.keyDown('right')
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(0.1)
             pydirectinput.keyUp('right')
             time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
@@ -793,11 +877,37 @@ def get_current_wave_number(last_wave=None):
     roi_w = int(w * 70 / 1920)
     roi_h = int(h * 35 / 1080)
     roi = gray[y:y+roi_h, x:x+roi_w]
+    
+    # Check for E prefix in wave ROI
+    e_template = cv2.imread(os.path.join("numbers", "E.png"), cv2.IMREAD_GRAYSCALE)
+    if e_template is not None:
+        scale_factor = roi.shape[0] / e_template.shape[0]
+        e_template = cv2.resize(e_template, (int(e_template.shape[1] * scale_factor), roi.shape[0]))
+
+        res = cv2.matchTemplate(roi, e_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        if DEBUG:
+            log.debug(f"[Wave] E detection confidence: {max_val:.2f}")
+
+        if max_val >= 0.7:
+            # Crop out E region from the ROI
+            e_width = e_template.shape[1]
+            roi = roi[:, e_width:]  # Strip E from the left side
+            if DEBUG:
+                log.debug("[Wave] E prefix detected and removed from ROI.")
 
     roi = cv2.equalizeHist(roi)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
-    _, roi = cv2.threshold(roi, 150, 255, cv2.THRESH_BINARY)
+    _, roi = cv2.threshold(roi, 160, 255, cv2.THRESH_BINARY)
 
+    # Strengthen digits (especially thin ones like 1, 7)
+    kernel = np.ones((2, 2), np.uint8)
+    roi = cv2.dilate(roi, kernel, iterations=1)
+
+    # Resize ROI slightly larger to match templates from higher wave counts
+    roi = cv2.resize(roi, None, fx=1.2, fy=1.2, interpolation=cv2.INTER_LINEAR)
+        
     # Digit matching logic
     h_roi, w_roi = roi.shape
     heatmap = np.zeros((h_roi, w_roi), dtype=np.float32)
@@ -820,7 +930,7 @@ def get_current_wave_number(last_wave=None):
                     digit_map[y_res, x_res] = digit
 
     # Collect best matches above threshold
-    threshold = 0.65
+    threshold = 0.7
     matches = []
     for y_scan in range(digit_map.shape[0]):
         for x_scan in range(digit_map.shape[1]):
@@ -855,15 +965,7 @@ def get_current_wave_number(last_wave=None):
         if last_wave is not None and wave < last_wave:
             if DEBUG:
                 log.debug(f"Ignoring regressed wave number: {wave} < {last_wave}")
-
-            str_wave = str(wave)
-            if str_wave.endswith("0"):
-                for replacement in ["6", "8"]:
-                    guessed_wave = int(str_wave[:-1] + replacement)
-                    if guessed_wave > last_wave:
-                        log.warning(f"Wave misread detected. Replacing {wave} with guessed {guessed_wave}")
-                        return guessed_wave
-            return None  # Skip bad regression
+            return None
         return wave
 
     except ValueError:
@@ -885,23 +987,23 @@ def get_current_gold_amount():
 
     # Estimate ROI for gold (top-right)
     h, w = gray.shape
-    x = int(w * 1650 / 1920)
-    y = int(h * 45 / 1080)
-    roi_w = int(w * 200 / 1920)
-    roi_h = int(h * 35 / 1080)
+    x = int(w * 70 / 1920)
+    y = int(h * 660 / 1080)
+    roi_w = int(w * 180 / 1920)
+    roi_h = int(h * 50 / 1080)
     roi = gray[y:y+roi_h, x:x+roi_w]
 
     # Preprocess ROI for better OCR
     roi = cv2.equalizeHist(roi)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
-    _, roi = cv2.threshold(roi, 150, 255, cv2.THRESH_BINARY)
+    _, roi = cv2.threshold(roi, 80, 255, cv2.THRESH_BINARY_INV)
 
     h_roi, w_roi = roi.shape
     heatmap = np.zeros((h_roi, w_roi), dtype=np.float32)
     digit_map = np.full((h_roi, w_roi), -1, dtype=np.int32)
 
     for digit in reversed(range(10)):
-        template_path = os.path.join("numbers", f"{digit}.png")
+        template_path = os.path.join("numbers", f"gold_{digit}.png")
         template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
         if template is None:
             continue
@@ -916,7 +1018,7 @@ def get_current_gold_amount():
                     heatmap[y_res, x_res] = score
                     digit_map[y_res, x_res] = digit
 
-    threshold = 0.5
+    threshold = 0.7
     matches = []
     for y_scan in range(digit_map.shape[0]):
         for x_scan in range(digit_map.shape[1]):
@@ -924,12 +1026,6 @@ def get_current_gold_amount():
             score = heatmap[y_scan, x_scan]
             if digit != -1 and score >= threshold:
                 matches.append((x_scan, digit, score))
-
-    if DEBUG:
-        heatmap_vis = (heatmap * 255).astype(np.uint8)
-        os.makedirs("debug", exist_ok=True)
-        cv2.imwrite("debug/gold_roi.png", roi)
-        cv2.imwrite("debug/gold_heatmap.png", heatmap_vis)
 
     if not matches:
         return None
@@ -944,17 +1040,13 @@ def get_current_gold_amount():
 
     digits = [str(d) for _, d, _ in filtered]
 
-    if DEBUG:
-        digit_debug = ", ".join([f"{d} ({c:.2f})" for (_, d, c) in filtered])
-        log.debug(f"Matched gold digits: [{digit_debug}]")
-
     try:
         return int("".join(digits))
     except ValueError:
         return None
 
 def detect_victory():
-    global last_victory_time, victory_detected, run_start_time
+    global last_victory_time, victory_detected, run_start_time, gold_start, gold_last, grand_total_gold
     
     try:
         current_time = time.time()
@@ -976,16 +1068,24 @@ def detect_victory():
         
         _, confidence, _, _ = cv2.minMaxLoc(res)
         
-        time.sleep(2) # Wait for results to load
+        time.sleep(1) # Wait for results to load
         
         screenshot = get_window_screenshot(window)
         
-        if confidence > CONFIDENCE_THRESHOLD:
+        if confidence > 0.7:
             run_time = 0
             if run_start_time > 0:
                 run_time = current_time - run_start_time
                 run_start_time = 0
-            
+                
+            last_victory_time = current_time
+            victory_detected = True
+            if gold_start is not None and gold_last is not None:
+                gold_gained = gold_last - gold_start
+                global grand_total_gold
+                grand_total_gold += gold_gained
+                log.info(f"[Victory] Gold gained: {gold_gained} | Grand total: {grand_total_gold}")
+                
             if DEBUG:
                 log.debug(f"Victory detected! (confidence: {confidence:.2f})")
             if DISCORD_WEBHOOK_URL:
@@ -996,8 +1096,9 @@ def detect_victory():
                 if DEBUG:
                     log.debug("Discord webhook URL not set, skipping upload")
             
-            last_victory_time = current_time
-            victory_detected = True
+            gold_start = None
+            gold_last = None
+            gold_log = []
             return True
             
         return False
@@ -1050,17 +1151,38 @@ def generate_upgrade_summary():
 
 def upload_to_discord(screenshot, run_time):
     try:
-        _, img_encoded = cv2.imencode('.jpg', screenshot, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        _, img_encoded = cv2.imencode('.png', screenshot)
         img_bytes = BytesIO(img_encoded.tobytes())
         
         minutes, seconds = divmod(run_time, 60)
         time_str = f"{int(minutes):02d}:{int(seconds):02d}"
-        
+
+        # Final wave
+        final_wave = last_wave_number
+
+        # Gold stats
+        gold_this_run = gold_last - gold_start if gold_start is not None and gold_last is not None else 0
+        gold_per_min = (gold_this_run / run_time) * 60 if run_time > 0 else 0
+        gold_per_hr = (gold_this_run / run_time) * 3600 if run_time > 0 else 0
+
         summary = generate_upgrade_summary()
+
+        gold_report = (
+            f"**Run Summary**\n"
+            f"• Wave Reached: {final_wave}\n"
+            f"• Time: {time_str}\n"
+            f"• Gold This Run: {gold_this_run:,}\n"
+            f"• Gold/min: {gold_per_min:,.2f}\n"
+            f"• Gold/hr: {gold_per_hr:,.2f}\n"
+            f"• Grand Total Gold: {grand_total_gold:,}\n\n"
+        )
+
+        payload = {
+            "content": f"{gold_report}{summary}",
+            "username": "AFM"
+        }
         
         files = {'file': ('victory.png', img_bytes, 'image/png')}
-        
-        payload = {"content": f"Run completed in {time_str}\n{summary}", "username": "AFM"}
         
         response = requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files)
         
@@ -1083,23 +1205,23 @@ def restart_run():
     try:
         time.sleep(BUTTON_DELAY)
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
         for _ in range(3):
             pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(0.1)
             pydirectinput.keyUp('down')
             time.sleep(BUTTON_DELAY)
             
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
@@ -1112,6 +1234,58 @@ def restart_run():
     except Exception as e:
         log.error(f"Run restart error: {str(e)}")
         return False
+
+def detect_ui_elements_and_respond():
+    try:
+        window = get_roblox_window()
+        if not window:
+            return
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
+            return
+
+        settings_detected = template_match(screenshot, get_template_path("settings.png"), confidence=0.7)
+        lobby_detected = template_match(screenshot, get_template_path("lobby.png"), confidence=0.7)
+
+        if settings_detected:
+            log.info("Detected settings UI. Toggling UI.")
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+            for _ in range(3):
+                pydirectinput.press('left')
+                time.sleep(BUTTON_DELAY)
+            
+            pydirectinput.press('up')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+
+        if lobby_detected:
+            log.info("Detected lobby UI. Attempting to escape.")
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+            for _ in range(5):
+                pydirectinput.press('up')
+                time.sleep(BUTTON_DELAY)
+            
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+            
+            time.sleep(1)
+            # Check again
+            screenshot = get_window_screenshot(window)
+            if template_match(screenshot, get_template_path("lobby.png"), confidence=0.7):
+                pydirectinput.press('down')
+                time.sleep(BUTTON_DELAY)
+                pydirectinput.press('enter')
+                time.sleep(BUTTON_DELAY)
+                
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+
+    except Exception as e:
+        log.error(f"UI detection error: {str(e)}")
 
 def template_match(screenshot, template_path, confidence=0.7):
     try:
@@ -1138,33 +1312,33 @@ def teleport_to_endless():
             log.debug(f"Teleporting to Endless Area")
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('down')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('down')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         for _ in range(2):
             pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(0.1)
             pydirectinput.keyUp('down')
             time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
@@ -1181,7 +1355,7 @@ def move_to_endless():
             
         time.sleep(0.5)
         pydirectinput.keyDown('q')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('q')
         time.sleep(1)
         
@@ -1217,14 +1391,14 @@ def toggle_troops():
                 # First open the menu
         time.sleep(1)
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
 
         # Navigate to auto troops option
         for _ in range(7):
             pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(0.1)
             pydirectinput.keyUp('down')
             time.sleep(BUTTON_DELAY)
 
@@ -1232,20 +1406,20 @@ def toggle_troops():
             log.error("Auto troops button not found after 10 seconds")
             # Close menu
             pydirectinput.keyDown(UI_TOGGLE_KEY)
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(0.1)
             pydirectinput.keyUp(UI_TOGGLE_KEY)
             time.sleep(BUTTON_DELAY)
             return False
 
         # Press enter to enable auto troops
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
 
         # Close the menu
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
@@ -1256,7 +1430,7 @@ def toggle_troops():
         log.error(f"Auto Troops Error: {str(e)}")
         # Ensure menu is closed if error occurs
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(0.1)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         return False
@@ -1270,7 +1444,7 @@ def detect_disconnection_button():
         screenshot = get_window_screenshot(window)
         if screenshot is None:
             return False
-
+ 
         template_path = get_template_path("reconnect.png")
         template = cv2.imread(template_path)
         if template is None:
@@ -1283,7 +1457,7 @@ def detect_disconnection_button():
         if DEBUG:
             log.debug(f"Disconnection button match confidence: {confidence:.2f}")
 
-        return confidence >= 0.7
+        return confidence >= 0.6
 
     except Exception as e:
         log.error(f"Disconnection detection error: {str(e)}")
@@ -1393,91 +1567,78 @@ def rejoin_game():
 
     log.info("Attempting to rejoin and restart farming...")
 
-    if not focus_roblox_window():
-        log.error("Roblox window not found, skipping rejoin.")
-        return False
+    while True:
+        if not focus_roblox_window():
+            log.error("Roblox window not found, retrying in 5 seconds...")
+            time.sleep(5)
+            continue
 
-    try:
-        # Click reconnect button just once
-        if not click_on_template("reconnect.png", confidence=0.6):
-            log.error("Failed to click reconnect button")
-            return False
+        try:
+            # Click reconnect button
+            if not click_on_template("reconnect.png", confidence=0.6):
+                log.error("Failed to click reconnect button, retrying in 5 seconds...")
+                time.sleep(5)
+                continue
 
-        log.info("Reconnect button clicked successfully, waiting for game to load...")
-        
-        # Wait for reconnect button to disappear (game is loading)
-        start_time = time.time()
-        timeout = 30
-        last_reconnect_check = 0
-        reconnect_check_interval = 2
-        
-        while time.time() - start_time < timeout:
-            current_time = time.time()
-            
-            if current_time - last_reconnect_check > reconnect_check_interval:
-                window = get_roblox_window()
-                if window:
-                    screenshot = get_window_screenshot(window)
-                    if screenshot is not None:
-                        # Check if reconnect button is still visible
-                        if not template_match(screenshot, get_template_path("reconnect.png"), confidence=0.5):
-                            log.info("Reconnect button disappeared, game is loading")
-                            break
-                last_reconnect_check = current_time
-            
-            time.sleep(0.5)
+            log.info("Reconnect clicked, waiting for game to load...")
 
-        # Now wait for menu to appear
-        menu_timeout = 60
-        menu_start_time = time.time()
-        
-        while time.time() - menu_start_time < menu_timeout:
-            window = get_roblox_window()
-            if window:
-                screenshot = get_window_screenshot(window)
-                if screenshot is not None:
-                    # Check if menu is visible
-                    if template_match(screenshot, get_template_path("menu.png")):
-                        log.info("Menu detected, proceeding with rejoining process")
-                        time.sleep(5)  # Additional wait
-                        break
-                    
-                    # Check if we got disconnected again
-                    if template_match(screenshot, get_template_path("reconnect.png")):
-                        log.warning("Disconnected again during loading")
-                        return False
-            
-            time.sleep(1)
+            # Wait for reconnect button to disappear
+            start_time = time.time()
+            while time.time() - start_time < 30:
+                screenshot = get_window_screenshot(get_roblox_window())
+                if screenshot is None:
+                    continue
+                if not template_match(screenshot, get_template_path("reconnect.png"), confidence=0.5):
+                    break
+                time.sleep(1)
+            else:
+                log.warning("Reconnect button still visible after timeout, retrying...")
+                time.sleep(3)
+                continue
 
-        else:
-            log.error("Menu didn't appear after rejoin (timeout).")
-            return False
+            # Wait for menu to appear
+            start_time = time.time()
+            while time.time() - start_time < 60:
+                screenshot = get_window_screenshot(get_roblox_window())
+                if screenshot is None:
+                    continue
+                if template_match(screenshot, get_template_path("menu.png")):
+                    log.info("Menu detected, proceeding.")
+                    break
+                if template_match(screenshot, get_template_path("reconnect.png")):
+                    log.warning("Disconnected again during loading, retrying...")
+                    time.sleep(3)
+                    continue
+                time.sleep(1)
+            else:
+                log.warning("Menu not detected in time. Retrying...")
+                time.sleep(3)
+                continue
 
-        # Proceed with rejoining process
-        if not teleport_to_endless():
-            log.error("Failed to teleport to endless area.")
-            return False
-        time.sleep(1)
+            # Perform rejoin steps
+            if not teleport_to_endless():
+                log.error("Teleport failed, retrying...")
+                time.sleep(3)
+                continue
+            if not move_to_endless():
+                log.error("Move failed, retrying...")
+                time.sleep(3)
+                continue
+            if not toggle_troops():
+                log.error("Toggle auto troops failed, retrying...")
+                time.sleep(3)
+                continue
 
-        if not move_to_endless():
-            log.error("Failed to move to endless area.")
-            return False
-        time.sleep(1)
+            # Reset run state
+            run_start_time = time.time()
+            victory_detected = False
+            upgrades_purchased = defaultdict(lambda: defaultdict(int))
+            log.info("Rejoined and restarted successfully.")
+            return True
 
-        if not toggle_troops():
-            log.error("Failed to enable auto troops.")
-            return False
-
-        # Reset run stats
-        run_start_time = time.time()
-        victory_detected = False
-        upgrades_purchased = defaultdict(lambda: defaultdict(int))
-        log.info("Rejoined successfully and restarted run.")
-        return True
-
-    except Exception as e:
-        log.error(f"Rejoin error: {str(e)}")
-        return False
+        except Exception as e:
+            log.error(f"Rejoin error: {str(e)} — retrying in 5 seconds...")
+            time.sleep(5)
 
 def is_key_pressed(key, check_hold=False):
     global last_key_press_time, key_hold_state
@@ -1593,7 +1754,8 @@ def check_for_update():
         log.error(f"Update check failed: {e}")
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number
+    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number, last_wave_reset_time, post_boss_missed_upgrade
+    global last_upgrade_time, gold_start, gold_last, gold_log, grand_grand_total_gold, wave_scan_block_until, last_wave_gold_check 
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Mode: {MODE.capitalize()} Scan | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -1604,6 +1766,7 @@ def main_loop():
     
     run_start_time = time.time()
     victory_detected = False
+    wave_scan_block_until = 0
     
     if MODE == "manual":
         manual_mode_loop()
@@ -1618,8 +1781,15 @@ def main_loop():
     # === Start Threads ===
     upgrade_thread = UpgradeScannerThread()
     victory_thread = VictoryCheckerThread()
+    ui_thread = UIDetectorThread(interval=5)
     upgrade_thread.start()
     victory_thread.start()
+    ui_thread.start()
+    
+    gold_wave_thread = None
+    if GOLD_WAVE_TRACKING:
+        gold_wave_thread = GoldWaveScannerThread()
+        gold_wave_thread.start()
     
     afk_thread = None
     if AFK_PREVENTION:
@@ -1633,74 +1803,75 @@ def main_loop():
     
     try:
         while True:
-            if is_key_pressed(STOP_KEY):
-                log.info("=== Stopped ===")
-                is_running = False
-                allow_sleep()
-                break
-
-            if is_key_pressed(START_KEY):
-                if not is_running:
-                    log.info("=== Started ===")
-                    is_running = True
-                    run_start_time = time.time()
-                time.sleep(0.5)
-
-            if is_key_pressed(PAUSE_KEY):
-                is_paused = not is_paused
-                log.info(f"=== {'Paused' if is_paused else 'Resumed'} ===")
-                time.sleep(0.5)
-
-            if is_running and not is_paused: # Pull victory result
-                if victory_thread.get_victory():
-                    if victory_detected:
-                        restart_run()
-
-                upgrades = upgrade_thread.get_upgrades() # Pull upgrade scan result
-                if upgrades:
-                    wave = get_current_wave_number(last_wave=last_wave_number)
-
-                    if wave is not None:
-                        last_wave_number = wave
-                    elif last_wave_number < WAVE_THRESHOLD:
-                        if DEBUG:
-                            log.debug("Wave number not detected, but continuing since under threshold.")
-                        wave = last_wave_number  # Use the last known wave
-                    else:
-                        if DEBUG:
-                            log.debug("Wave number not detected. Skipping upgrade.")
-                        continue
-
-                    last_wave_number = wave
-
-                    if wave < WAVE_THRESHOLD:
-                        select_best_upgrade(upgrades)
-                        upgrade_allowed = True  # Always allow upgrades below threshold
-
-                    else:
-                        # Boss rounds every 5 waves (0 and 5); upgrade only once on wave % 5 == 1
-                        if wave % 5 == 1 and upgrade_allowed:
-                            log.info(f"Post-boss wave {wave}: upgrading once.")
-                            select_best_upgrade(upgrades)
-                            upgrade_allowed = False  # Lock upgrades until next boss
-
-                        elif wave % 5 in [0, 5]:
-                            upgrade_allowed = True  # Reset upgrade allowance on boss wave
-
-                        else:
-                            if DEBUG:
-                                log.debug(f"Holding upgrade at wave {wave} (waiting for next post-boss)")
-
             time.sleep(0.05)
 
-    finally: # Ensure threads are stopped when loop ends
+            if not is_running or is_paused:
+                continue
+
+            if victory_thread.get_victory():
+                if victory_detected:
+                    restart_run()
+                    wave_scan_block_until = time.time() + 5
+                    last_wave_number = 0
+
+            upgrades = upgrade_thread.get_upgrades()
+            wave = last_wave_number
+
+            if upgrades:
+                if wave < WAVE_THRESHOLD:
+                    if select_best_upgrade(upgrades):
+                        last_upgrade_time = time.time()
+                        current_gold = gold_last
+                        if current_gold is not None:
+                            if gold_start is None:
+                                gold_start = current_gold
+                            gold_diff = current_gold - gold_start
+                            time_diff = time.time() - run_start_time if run_start_time else 1
+                            gold_per_hour = (gold_diff / time_diff) * 3600
+
+                            if DEBUG:
+                                log.debug(f"[Upgrade] Gold: {current_gold} | Gained: {gold_diff} | Rate: {gold_per_hour:.2f}/hr")
+
+                else:
+                    # Post-threshold wave upgrade logic
+                    if wave % 5 == 1 or wave % 5 == 6:
+                        if upgrade_allowed:
+                            log.info(f"Post-boss wave {wave}: upgrading once.")
+                            if select_best_upgrade(upgrades):
+                                last_upgrade_time = time.time()
+                                upgrade_allowed = False
+                                post_boss_missed_upgrade = False
+                    elif post_boss_missed_upgrade:
+                        log.info(f"Missed post-boss. Performing safety upgrade at wave {wave}.")
+                        if select_best_upgrade(upgrades):
+                            last_upgrade_time = time.time()
+                            post_boss_missed_upgrade = False
+                            upgrade_allowed = False
+                    elif wave % 5 in [0, 5]:
+                        upgrade_allowed = True
+                        post_boss_missed_upgrade = True
+                    else:
+                        if DEBUG:
+                            log.debug(f"Holding upgrade at wave {wave} (waiting for next post-boss)")
+            
+            if int(time.time()) % 30 == 0:
+                gc.collect()
+
+    except KeyboardInterrupt:
+        log.info("Shutting down...")
+
+    finally:
         upgrade_thread.stop()
         victory_thread.stop()
-        afk_thread.stop()
+        ui_thread.stop()
 
         upgrade_thread.join(timeout=5)
         victory_thread.join(timeout=5)
-        afk_thread.join(timeout=5)
+        ui_thread.join(timeout=5)
+        
+        if gold_wave_thread:
+            gold_wave_thread.stop()
+            gold_wave_thread.join(timeout=5)
         
         if afk_thread:
             afk_thread.stop()
