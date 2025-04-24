@@ -1,5 +1,6 @@
 import time
 import pydirectinput
+pydirectinput.FAILSAFE = False
 import keyboard
 import pyautogui
 import cv2
@@ -23,7 +24,7 @@ from io import BytesIO
 from datetime import datetime
 from collections import defaultdict
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
@@ -378,6 +379,47 @@ class AFKPreventionThread(threading.Thread):
 
     def stop(self):
         self.running = False
+
+class KeyListenerThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = True
+        self.last_pressed = {}
+
+    def check_key(self, key, action):
+        if keyboard.is_pressed(key):
+            if not self.last_pressed.get(key, False):
+                action()
+                self.last_pressed[key] = True
+        else:
+            self.last_pressed[key] = False
+
+    def run(self):
+        global is_running, is_paused
+
+        while self.running:
+            self.check_key(START_KEY, self.start_script)
+            self.check_key(PAUSE_KEY, self.toggle_pause)
+            self.check_key(STOP_KEY, self.stop_script)
+            time.sleep(0.05)
+
+    def start_script(self):
+        global is_running
+        if not is_running:
+            is_running = True
+            log.info("[Keybind] Script started")
+
+    def toggle_pause(self):
+        global is_paused
+        is_paused = not is_paused
+        log.info(f"[Keybind] Script {'paused' if is_paused else 'resumed'}")
+
+    def stop_script(self):
+        global is_running
+        is_running = False
+        self.running = False
+        log.info("[Keybind] Script stopped via keybind")
+        os._exit(0)
 
 def setup_logging():
     with open('afm_macro.log', 'w'):
@@ -1786,9 +1828,11 @@ def main_loop():
     upgrade_thread = UpgradeScannerThread()
     victory_thread = VictoryCheckerThread()
     ui_thread = UIDetectorThread(interval=5)
+    key_thread = KeyListenerThread()
     upgrade_thread.start()
     victory_thread.start()
     ui_thread.start()
+    key_thread.start()
     
     gold_wave_thread = None
     if GOLD_WAVE_TRACKING:
@@ -1868,22 +1912,24 @@ def main_loop():
         upgrade_thread.stop()
         victory_thread.stop()
         ui_thread.stop()
+        key_thread.running = False
 
-        upgrade_thread.join(timeout=5)
-        victory_thread.join(timeout=5)
-        ui_thread.join(timeout=5)
+        upgrade_thread.join(timeout=2)
+        victory_thread.join(timeout=2)
+        ui_thread.join(timeout=2)
+        key_thread.join(timeout=2)
         
         if gold_wave_thread:
             gold_wave_thread.stop()
-            gold_wave_thread.join(timeout=5)
+            gold_wave_thread.join(timeout=2)
         
         if afk_thread:
             afk_thread.stop()
-            afk_thread.join(timeout=5)
+            afk_thread.join(timeout=2)
         
         if disconnect_thread:
             disconnect_thread.stop()
-            disconnect_thread.join(timeout=5)
+            disconnect_thread.join(timeout=2)
 
 if __name__ == "__main__":
     check_for_update()
