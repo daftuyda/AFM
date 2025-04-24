@@ -672,6 +672,10 @@ def select_best_upgrade(upgrades):
     if not upgrades:
         log.debug("No upgrades detected")
         return False
+    
+    if not focus_roblox_window():
+        log.warning("Failed to focus Roblox window before upgrade.")
+        return False
 
     valid_upgrades = []
     for upgrade in upgrades:
