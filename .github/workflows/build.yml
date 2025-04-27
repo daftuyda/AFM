@@ -31,6 +31,7 @@ jobs:
           mkdir -p package
           cp -r dist/AFM.exe package/
           cp -r images package/
+          cp -r ultrawide package/
           Compress-Archive -Path package/* -DestinationPath AFM.zip -Force
 
       - name: Upload Artifact
@@ -45,21 +46,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-<<<<<<< Updated upstream
-          tag_name: v1.0
-          release_name: Release v1.0
+          tag_name: v1.0.0T
+          release_name: Tiny Test
           body: |
-            Initial release.
+            Tiny Test Release
           draft: false
           prerelease: true
-=======
-          tag_name: v1.1
-          release_name: AFM Endless Macro - v1.1
-          body: |
-            Placeholder for release notes.
-          draft: true
-          prerelease: false
->>>>>>> Stashed changes
 
       - name: Upload Release Asset
         id: upload-release-asset

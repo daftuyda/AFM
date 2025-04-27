@@ -1,33 +1,34 @@
 import time
 import pydirectinput
 import keyboard
-import pyautogui
 import cv2
 import numpy as np
 import pygetwindow as gw
-import requests
 import os
 import json
 import platform
 import ctypes
 import logging
 import mss
-import re
+import psutil
+import ctypes
 from logging.handlers import RotatingFileHandler
-from io import BytesIO
-from datetime import datetime
 from collections import defaultdict
 
 DEFAULT_CONFIG = {
+    "ultrawide_mode": False,
     "scan_interval": 5,
-    "start_key": "f6",
-    "pause_key": "f7",
-    "stop_key": "f8",
+    "start_key": "F6",
+    "pause_key": "F7",
+    "stop_key": "F8",
     "auto_start": False,
-    "webhook_url": "",
-    "mode": "auto",
-    "button_delay": 0.1,
-    "debug": False
+    "money_mode": False,
+    "afk_prevention": True,
+    "ui_detection": True,
+    "button_delay": 0.2,
+    "high_priority": ["regen", "boss", "discount", "atk", "health", "units"],
+    "low_priority": ["luck", "speed", "heal", "jade", "enemy"],
+    "debug": False,
 }
 
 CONFIG_PATH = "config.json"
@@ -39,68 +40,52 @@ def load_config():
         print(f"[INFO] Created default config at {CONFIG_PATH}")
 
     with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
+        return json.load(f)
 
-    return config
+def add_png_suffix(items):
+    return [f"{item}.png" for item in items]
 
 config = load_config()
+ULTRAWIDE_MODE = config.get("ultrawide_mode", False)
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
 BUTTON_DELAY = config.get("button_delay", 0.2)
 START_KEY = config.get("start_key", "f6")
 PAUSE_KEY = config.get("pause_key", "f7")
 STOP_KEY = config.get("stop_key", "f8")
-DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
-MODE = config.get("mode", "auto")
+HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_priority"]))
+LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
+UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
+MONEY_MODE = config.get("money_mode", False)
+AFK_PREVENTION = config.get("afk_prevention", True)
 
-CONFIDENCE_THRESHOLD = 0.8
-UI_TOGGLE_KEY = '\\'
+IMAGE_FOLDER = "ultrawide" if ULTRAWIDE_MODE else "images"
+CONFIDENCE_THRESHOLD = 0.7
+UI_TOGGLE_KEY = "\\"
 DEBOUNCE_TIME = 0.3
 KEY_HOLD_TIME = 0.3
 
 # State variables
-last_victory_time = 0
-run_start_time = 0
-victory_detected = False
-upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
+upgrades_purchased = defaultdict(lambda: defaultdict(int))
 last_key_press_time = defaultdict(float)
 key_hold_state = defaultdict(bool)
-last_disconnect_check = 0
-
-IMAGE_FOLDER = "images"
-UPGRADE_PRIORITY = [
-    "regen.png",
-    "boss.png",
-    "discount.png",
-    "atk.png",
-    "health.png",
-    "units.png",
-    "luck.png",
-    "speed.png",
-    "heal.png",
-    "jade.png",
-    "enemy.png"
-]
-
-VICTORY_TEMPLATE = "victory.png"
-DISCONNECT_TEMPLATE = "disconnected.png"
-MENU_TEMPLATE = "menu.png"
+last_afk_action = 0
+afk_interval = 600
 
 RARITY_COLORS = {
-    (71, 99, 189): "Common",     # Blue
-    (190, 60, 238): "Epic",      # Purple
-    (238, 208, 60): "Legendary", # Yellow
-    (238, 60, 60): "Mythic"      # Red
+    (71, 99, 189): "Common",
+    (190, 60, 238): "Epic",
+    (238, 208, 60): "Legendary",
+    (238, 60, 60): "Mythic",
 }
 
 RARITY_ORDER = ["Unknown", "Common", "Epic", "Legendary", "Mythic"]
 
+# Windows sleep prevention
 if platform.system() == "Windows":
-
-    # Constants
     ES_CONTINUOUS = 0x80000000
     ES_SYSTEM_REQUIRED = 0x00000001
     ES_DISPLAY_REQUIRED = 0x00000002
@@ -113,296 +98,21 @@ if platform.system() == "Windows":
     def allow_sleep():
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 else:
-    def prevent_sleep():
-        print("[WARN] Sleep prevention not implemented for this OS")
-
-    def allow_sleep():
-        pass
-
-class NetworkManager:
-    def __init__(self):
-        # Initialize with default values
-        self.config = {
-            "enable_networking": False,
-            "coordination_server": "http://api.daftuyda.moe",
-            "default_session_id": "default_session",
-            "api_key": "Secret",
-            "total_players": 4,
-            "move_delay": 2
-        }
-        
-        # Try to load network_config.json if it exists
-        try:
-            if os.path.exists('network_config.json'):
-                with open('network_config.json') as f:
-                    loaded_config = json.load(f)
-                    self.config.update(loaded_config)
-        except Exception as e:
-            log.error(f"Error loading network config: {e}")
-        
-        self.session_id = self.config["default_session_id"]
-        self.player_id = None
-        self.move_order = 0
-        self.current_sequence = 0
-        self.last_status_check = 0
-        self.last_move_time = 0
-        self.last_ping_time = 0
-        self.ping_interval = 15  # Ping every 15 seconds
-
-    def send_ping(self):
-        if not self.config["enable_networking"] or not self.player_id:
-            return False
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/ping",
-                json={"player_id": self.player_id},
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            return response.status_code == 200
-        except Exception as e:
-            log.error(f"Ping failed: {str(e)}")
-            return False
-
-    def check_auto_start(self):
-        if not self.config["enable_networking"]:
-            return False
-            
-        status = self.check_status()
-        if status and status.get("started", False):
-            return True
-            
-        # Send periodic pings
-        if time.time() - self.last_ping_time > self.ping_interval:
-            self.send_ping()
-            self.last_ping_time = time.time()
-            
-        return False
-    
-    def synchronized_start(self):
-        global is_running
-        
-        if not self.config["enable_networking"]:
-            log.info("Networking disabled - starting solo run")
-            return True
-            
-        # Register player
-        if not self.register_player(self.config["total_players"]):
-            log.error("Failed to register player")
-            return False
-            
-        log.info("Waiting for party...")
-        
-        while True:
-            # Check for auto-start condition
-            if self.check_auto_start():
-                log.info("Auto-start triggered")
-                break
-                
-            status = self.check_status()
-            if not status:
-                time.sleep(5)
-                continue
-                
-            log.info(f"Party status: {len(status.get('players', []))}/{self.config['total_players']} players")
-            
-            # Check if manually started (all players ready)
-            if status.get("ready_players", 0) >= status.get("total_players", 4):
-                log.info("All players ready!")
-                break
-                
-            # Check for disconnections
-            if status.get("disconnected_players"):
-                log.error("Other players disconnected - aborting")
-                return False
-                
-            time.sleep(5)
-        
-        # Proceed with game start
-        is_running = True
-        return True
-
-    def register_player(self, total_players=4):
-        if not self.config["enable_networking"]:
-            return False
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/register",
-                json={
-                    "session_id": self.session_id,
-                    "total_players": total_players
-                },
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                self.player_id = data["player_id"]
-                self.move_order = data["order"]
-                log.info(f"Registered as player {self.player_id} (order {self.move_order})")
-                return True
-                
-        except Exception as e:
-            log.error(f"Registration failed: {str(e)}")
-            return False
-
-    def mark_ready(self):
-        if not self.config["enable_networking"] or not self.player_id:
-            return False
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/ready",
-                json={"player_id": self.player_id},
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            return response.status_code == 200
-            
-        except Exception as e:
-            log.error(f"Ready check failed: {str(e)}")
-            return False
-
-    def mark_loaded(self):
-        if not self.config["enable_networking"] or not self.player_id:
-            return False, 0
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/loaded",
-                json={"player_id": self.player_id},
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data["all_loaded"], data["move_sequence"]
-        except Exception as e:
-            log.error(f"Loaded check failed: {str(e)}")
-            
-        return False, 0
-
-    def check_status(self):
-        if not self.config["enable_networking"]:
-            return None
-            
-        try:
-            response = requests.get(
-                f"{self.config['coordination_server']}/status/{self.session_id}",
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            log.error(f"Status check failed: {str(e)}")
-            
-        return None
-
-    def mark_disconnected(self):
-        if not self.config["enable_networking"] or not self.player_id:
-            return False
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/disconnect",
-                json={"player_id": self.player_id},
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            return response.status_code == 200
-        except Exception as e:
-            log.error(f"Disconnect notification failed: {str(e)}")
-            return False
-
-    def get_next_move(self):
-        if not self.config["enable_networking"] or not self.player_id:
-            return self.move_order, self.current_sequence
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/next_move",
-                json={"player_id": self.player_id},
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data["move_order"], data["current_sequence"]
-        except Exception as e:
-            log.error(f"Move check failed: {str(e)}")
-            
-        return self.move_order, self.current_sequence
-
-    def wait_for_move_turn(self):
-        if not self.config["enable_networking"]:
-            return True
-            
-        while True:
-            status = self.check_status()
-            if not status:
-                time.sleep(1)
-                continue
-                
-            if status.get("current_move_order") == self.move_order and \
-               status.get("current_sequence") > self.current_sequence:
-                self.current_sequence = status["current_sequence"]
-                self.last_move_time = time.time()
-                return True
-                
-            time.sleep(0.5)
-
-    def complete_move(self):
-        if not self.config["enable_networking"]:
-            return True
-            
-        try:
-            response = requests.post(
-                f"{self.config['coordination_server']}/complete_move",
-                json={
-                    "player_id": self.player_id,
-                    "sequence": self.current_sequence
-                },
-                headers={"X-API-Key": self.config['api_key']},
-                timeout=5
-            )
-            return response.status_code == 200
-        except Exception as e:
-            log.error(f"Move completion failed: {str(e)}")
-            return False
-
-network = NetworkManager()
+    def prevent_sleep(): pass
+    def allow_sleep(): pass
 
 def setup_logging():
-    # Clear previous log file on startup
     with open('afm_macro.log', 'w'):
         pass
     
-    # Create logger
-    logger = logging.getLogger('AFM')
+    logger = logging.getLogger("AFM")
     logger.setLevel(logging.DEBUG)
     
-    # File handler (rotates when reaches 1MB)
-    file_handler = RotatingFileHandler(
-        'afm_macro.log', 
-        maxBytes=1024*1024, 
-        backupCount=3,
-        encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '[%(asctime)s] %(levelname)s: %(message)s',
-        datefmt='%H:%M:%S'
-    ))
+    file_handler = RotatingFileHandler("afm_macro.log", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
     
-    # Console handler (for real-time output)
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        '[%(asctime)s] %(message)s',
-        datefmt='%H:%M:%S'
-    ))
+    console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
     
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
@@ -410,15 +120,51 @@ def setup_logging():
 
 log = setup_logging()
 
-def get_template_path(filename):
-    """Helper function to get correct template path"""
-    return os.path.join(IMAGE_FOLDER, filename) if IMAGE_FOLDER else filename
+def get_pid_from_hwnd(hwnd):
+    pid = ctypes.c_ulong()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+def get_roblox_window():
+    try:
+        candidates = gw.getWindowsWithTitle("Roblox")
+        best_window = None
+        largest_area = 0
+
+        for window in candidates:
+            if window.isMinimized:
+                continue
+
+            try:
+                pid = get_pid_from_hwnd(window._hWnd)
+                exe_name = psutil.Process(pid).name().lower()
+            except Exception as e:
+                if DEBUG:
+                    log.debug(f"Failed to get process for window: {e}")
+                continue
+
+            if exe_name != "robloxplayerbeta.exe":
+                continue
+
+            area = window.width * window.height
+            if area > largest_area:
+                largest_area = area
+                best_window = window
+
+        if not best_window and DEBUG:
+            log.warning("No valid Roblox GAME window found.")
+
+        return best_window
+
+    except Exception as e:
+        if DEBUG:
+            log.error(f"Window detection error: {str(e)}")
+        return None
 
 def focus_roblox_window():
     try:
-        roblox_windows = gw.getWindowsWithTitle("Roblox")
-        if roblox_windows:
-            window = roblox_windows[0]
+        window = get_roblox_window()
+        if window:
             if not window.isActive:
                 window.activate()
                 time.sleep(0.2)
@@ -427,1021 +173,306 @@ def focus_roblox_window():
             log.warning("Roblox window not found")
     except Exception as e:
         if DEBUG:
-            log.error(f"Window focus error: {str(e)}")
+            log.error(f"Window focus error: {e}")
     return None
 
-def get_roblox_window():
-    """Get Roblox window dimensions without focusing, with multi-monitor support"""
-    try:
-        roblox_windows = gw.getWindowsWithTitle("Roblox")
-        if not roblox_windows:
-            if DEBUG:
-                log.warning("Roblox window not found")
-            return None
-            
-        window = roblox_windows[0]
-        
-        # Verify window is visible and has reasonable dimensions
-        if window.width < 100 or window.height < 100:
-            if DEBUG:
-                log.warning(f"Window too small: {window.width}x{window.height}")
-            return None
-            
-        return window
-        
-    except Exception as e:
-        if DEBUG:
-            log.error(f"Window detection error: {str(e)}")
-        return None
-
 def get_window_screenshot(window):
-    """Capture window screenshot without focusing using mss, supports any monitor"""
-    with mss.mss() as sct:
-        # Find which monitor the window is on
-        for monitor_num, monitor in enumerate(sct.monitors[1:], 1):
-            if (window.left >= monitor['left'] and 
-                window.top >= monitor['top'] and
-                window.left + window.width <= monitor['left'] + monitor['width'] and
-                window.top + window.height <= monitor['top'] + monitor['height']):
-                
-                # Calculate relative position within the monitor
-                monitor_region = {
-                    'left': window.left - monitor['left'],
-                    'top': window.top - monitor['top'],
-                    'width': window.width,
-                    'height': window.height,
-                    'mon': monitor_num
-                }
-                
-                sct_img = sct.grab(monitor_region)
-                img = np.array(sct_img)
-                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        
-        # Fallback to primary monitor if not found (shouldn't happen)
-        monitor_region = {
-            'left': window.left,
-            'top': window.top,
-            'width': window.width,
-            'height': window.height,
-            'mon': 1
-        }
-        sct_img = sct.grab(monitor_region)
-        img = np.array(sct_img)
-        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
-def scan_for_upgrades(max_attempts=3):
-    attempts = 0
-    last_results = []
-    
-    while attempts < max_attempts:
-        try:
-            window = get_roblox_window()
-            if not window:
-                time.sleep(1)
-                attempts += 1
-                continue
-            
-            # Capture the entire window screenshot using mss
-            screenshot = get_window_screenshot(window)
-            if screenshot is None:
-                log.error("Failed to capture window screenshot")
-                attempts += 1
-                continue
-
-            window_width = screenshot.shape[1]
-            window_height = screenshot.shape[0]
-
-            # Card dimensions and positioning relative to window
-            card_width = 350
-            gap = 50
-            first_card_left = (window_width // 2) - 575  # Adjust based on window screenshot width
-
-            # Define regions within the screenshot image
-            regions = [
-                (first_card_left, 0, card_width, window_height),
-                (first_card_left + card_width + gap, 0, card_width, window_height),
-                (first_card_left + 2*(card_width + gap), 0, card_width, window_height)
-            ]
-
-            found_upgrades = []
-            detected_positions = set()
-
-            for position, (x, y, w, h) in enumerate(regions):
-                try:
-                    # Adjust region to stay within screenshot bounds
-                    x = max(0, x)
-                    y = max(0, y)
-                    w = min(w, window_width - x)
-                    h = min(h, window_height - y)
-
-                    # Crop the region from the screenshot
-                    card_image = screenshot[y:y+h, x:x+w]
-
-                    for upgrade in UPGRADE_PRIORITY:
-                        template_path = get_template_path(upgrade)
-                        template = cv2.imread(template_path)
-                        if template is None:
-                            if DEBUG:
-                                log.warning(f"Template not found: {template_path}")
-                            continue
-
-                        res = cv2.matchTemplate(card_image, template, cv2.TM_CCOEFF_NORMED)
-                        _, confidence, _, _ = cv2.minMaxLoc(res)
-
-                        if confidence >= CONFIDENCE_THRESHOLD:
-                            upgrade_name = os.path.basename(upgrade)
-                            is_percent = False
-
-                            if upgrade_name in ["atk.png", "health.png"]:
-                                if DEBUG:
-                                    log.debug(f"Running percent check for {upgrade_name} at pos {position}")
-                                is_percent = is_percent_upgrade(card_image, position)
-                                if DEBUG:
-                                    log.debug(f"Percent check result: {is_percent}")
-
-                            rarity = get_rarity_from_color(card_image, position)
-                            found_upgrades.append({
-                                'upgrade': upgrade_name,
-                                'position': position,
-                                'rarity': rarity,
-                                'confidence': confidence,
-                                'is_percent': is_percent,
-                                'original_upgrade': upgrade_name
-                            })
-                            detected_positions.add(position)
-                            break
-
-                except Exception as e:
-                    if DEBUG:
-                        log.error(f"Error scanning position {position}: {str(e)}")
-
-            # Decision logic remains the same
-            if len(detected_positions) == 3:
-                return found_upgrades
-            elif attempts == max_attempts - 1:
-                return last_results if last_results else found_upgrades
-            else:
-                if DEBUG:
-                    missing = 3 - len(detected_positions)
-                    log.warning(f"Only detected {len(detected_positions)} upgrades (missing {missing}), retrying...")
-                time.sleep(0.3)
-                attempts += 1
-
-        except Exception as e:
-            log.error(f"Scan error: {str(e)}")
-            attempts += 1
-            time.sleep(1)
-
-    return last_results if last_results else []
-
-def get_rarity_from_color(image, position):
     try:
-        height, width = image.shape[:2]
-        
-        # Fixed X position
-        scan_x = 310
-        
-        # Fixed Y position
-        y_base = 605
-        
-        # Sample width 
-        sample_width = 10
-        
-        # Ensure we don't go out of bounds
-        if scan_x + sample_width > width:
-            scan_x = width - sample_width - 1
-        
-        # Define the scan region (5px tall, sample_width px wide)
-        sample_region = image[
-            y_base - 2 : y_base + 3,
-            scan_x : scan_x + sample_width
-        ]
-        
-        # Get average color (BGR → RGB for comparison)
-        avg_color = np.mean(sample_region, axis=(0, 1)).astype(int)
-        r, g, b = avg_color[2], avg_color[1], avg_color[0]  # Convert to (R, G, B)
-        rgb_color = (r, g, b)
-        
-        if DEBUG:
-            log.debug(f"Position {position} | Scanned at X={scan_x} | Color: {rgb_color}")
-        
-        # Find the closest rarity match
-        closest_match = "Unknown"
-        min_distance = float('inf')
-        
-        for ref_color, rarity in RARITY_COLORS.items():
-            distance = sum((c1 - c2) ** 2 for c1, c2 in zip(ref_color, rgb_color)) ** 0.5
-            if distance < min_distance:
-                min_distance = distance
-                closest_match = rarity
-                if distance < 30:  # Early exit if very close match
-                    break
-        
-        return closest_match if min_distance < 50 else "Unknown"
-        
+        with mss.mss() as sct:
+            monitor = {"left": window.left, "top": window.top, 
+                      "width": window.width, "height": window.height}
+            return cv2.cvtColor(np.array(sct.grab(monitor)), cv2.COLOR_BGRA2BGR)
     except Exception as e:
-        log.error(f"Rarity detection error: {str(e)}")
-        return "Unknown"
+        log.error(f"Screenshot failed: {str(e)}")
+        return None
+    
+def template_match(screenshot, template_path):
+    template = cv2.imread(template_path)
+    if template is None:
+        log.error(f"Template not found: {template_path}")
+        return None
+    
+    res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+    _, confidence, _, _ = cv2.minMaxLoc(res)
+    return confidence >= CONFIDENCE_THRESHOLD
 
-def is_percent_upgrade(screenshot, position):
-    """Check if the upgrade has a percent symbol using template matching"""
+def get_template_path(filename):
+    return os.path.join(IMAGE_FOLDER, filename)
+
+def is_percent_upgrade(card_img, position):
     try:
-        # Load the percent symbol template
-        percent_path = os.path.join(IMAGE_FOLDER, 'percent.png')
-        percent_template = cv2.imread(get_template_path("percent.png"))
-        if percent_template is None:
-            log.error(f"ERROR: Could not load percent template at {percent_path}")
-            return False
+        template1_path = get_template_path("percent.png")
+        if os.path.exists(template1_path):
+            template1 = cv2.imread(template1_path)
+            if template1 is not None:
+                res1 = cv2.matchTemplate(card_img, template1, cv2.TM_CCOEFF_NORMED)
+                _, confidence1, _, _ = cv2.minMaxLoc(res1)
+                if confidence1 > 0.7:
+                    if DEBUG:
+                        log.debug(f"Percent detected (template1) at position {position} with confidence {confidence1:.2f}")
+                    return True
 
-        height, width = screenshot.shape[:2]
-        
-        # Vertical region (same for all positions)
-        y_start = height // 2 + 20  # Start slightly below middle
-        y_end = height * 2 // 3 + 40  # End lower down
-        
-        # Position-specific horizontal regions - now showing full card width
-        if position == 0:  # Left upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
-        elif position == 2:  # Right upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
-        else:  # Middle upgrade
-            x_start = 0              # Start at very left
-            x_end = width            # End at very right
+        template2_path = get_template_path("percent2.png")
+        if os.path.exists(template2_path):
+            template2 = cv2.imread(template2_path)
+            if template2 is not None:
+                res2 = cv2.matchTemplate(card_img, template2, cv2.TM_CCOEFF_NORMED)
+                _, confidence2, _, _ = cv2.minMaxLoc(res2)
+                if confidence2 > 0.7:
+                    if DEBUG:
+                        log.debug(f"Percent detected (template2) at position {position} with confidence {confidence2:.2f}")
+                    return True
+        elif DEBUG:
+            log.debug("percent2.png not found, skipping check")
 
-        search_region = screenshot[y_start:y_end, x_start:x_end]
-        
-        # Perform template matching on the full card region
-        res = cv2.matchTemplate(screenshot, percent_template, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-        
         if DEBUG:
-            log.debug(f"Percent check - Max confidence: {max_val:.2f} at {max_loc}")
+            conf1 = confidence1 if 'confidence1' in locals() else 'N/A'
+            conf2 = confidence2 if 'confidence2' in locals() else 'N/A'
+            log.debug(f"Percent check results - Template1: {conf1}, Template2: {conf2}")
 
-        return max_val > 0.7  # Lower threshold slightly
-        
+        return False
+
     except Exception as e:
         log.error(f"Percent check error: {str(e)}")
         return False
 
-def select_best_upgrade(upgrades):
-    if not upgrades:
-        log.debug("No upgrades detected")
-        return False
-
-    # First filter out unwanted upgrades
-    valid_upgrades = []
-    for upgrade in upgrades:
-        # Skip Common unit upgrades
-        if "unit" in upgrade['upgrade'].lower() and upgrade['rarity'] == "Common":
-            if DEBUG:
-                log.debug(f"Skipping Common unit upgrade: {upgrade['upgrade']} at pos {upgrade['position']}")
-            continue
-            
-        # Skip flat ATK/HP upgrades (non-percent)
-        if (upgrade['original_upgrade'] in ['atk.png', 'health.png'] and 
-            not upgrade.get('is_percent', False)):
-            if DEBUG:
-                log.debug(f"Skipping flat {upgrade['original_upgrade']} upgrade at pos {upgrade['position']}")
-            continue
-            
-        valid_upgrades.append(upgrade)
+def scan_for_upgrades():
+    window = get_roblox_window()
+    if not window:
+        return []
     
-    # Fail-safe if no valid upgrades
-    if not valid_upgrades:
-        log.debug("No valid upgrades after filtering - using fail-safe")
-        for upgrade in upgrades:
-            if upgrade['position'] == 0:
-                log.debug(f"Fail-safe: Selecting position 0 ({upgrade['upgrade']})")
-                if navigate_to(0):
-                    record_upgrade_purchase(upgrade['upgrade'], upgrade['rarity'])
-                    return True
-        return False
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return []
 
-    # New improved sorting logic
-    def get_sort_key(upgrade):
-        # Priority groups (lower number = higher priority)
-        if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6:
-            group = 0  # High priority (first 6 in UPGRADE_PRIORITY)
-        else:
-            group = 1  # Low priority
+    card_width = int(window.width * 0.18)
+    gap = int(window.width * 0.03)
+    first_card_left = (window.width // 2) - int((card_width + gap) * 1.45)
 
-        return (
-            group,                          # Primary group (high/low priority)
-            -RARITY_ORDER.index(upgrade['rarity']),  # Higher rarity first within group
-            UPGRADE_PRIORITY.index(upgrade['original_upgrade'])  # Original priority order
-        )
+    found_upgrades = []
 
-    valid_upgrades.sort(key=get_sort_key)
+    for position in range(3):
+        x = first_card_left + position * (card_width + gap)
+        card_img = screenshot[0:window.height, x:x+card_width]
 
-    if DEBUG:
-        log.debug("Valid upgrades sorted:")
-        for idx, upgrade in enumerate(valid_upgrades, 1):
-            perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
-            # Determine group for debug display
-            group = "HIGH" if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6 else "LOW"
-            log.debug(f"{idx}. [{group}] {upgrade['upgrade']}{perc} ({upgrade['rarity']}) at pos {upgrade['position']}")
+        for upgrade_filename in UPGRADE_PRIORITY:
+            template_path = os.path.join(IMAGE_FOLDER, upgrade_filename)
+            template = cv2.imread(template_path)
+            if template is None:
+                continue
 
-    # Try to select best upgrade
-    for upgrade in valid_upgrades:
-        perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
-        if DEBUG:
-            log.debug(f"Attempting: {upgrade['upgrade']}{perc} at position {upgrade['position']}")
-        if navigate_to(upgrade['position']):
-            record_upgrade_purchase(upgrade['upgrade'], upgrade['rarity'])
-            clean_name = upgrade['upgrade'].replace('.png', '').replace("IMAGES\\","").upper()
-            log.debug(f"Selected upgrade: {clean_name} ({upgrade['rarity']})")
-            return True
+            res = cv2.matchTemplate(card_img, template, cv2.TM_CCOEFF_NORMED)
+            _, confidence, _, _ = cv2.minMaxLoc(res)
 
-    return False
+            if confidence < CONFIDENCE_THRESHOLD:
+                continue
+
+            rarity = get_rarity_from_color(card_img)
+            upgrade_name = upgrade_filename.replace(".png", "")
+
+            if "unit" in upgrade_name and rarity == "Common":
+                if DEBUG:
+                    log.debug(f"Skipping common unit upgrade at pos {position}")
+                continue
+
+            if upgrade_filename in ['atk.png', 'health.png'] and not is_percent_upgrade(card_img, position):
+                if DEBUG:
+                    log.debug(f"Skipping flat {upgrade_name} upgrade at pos {position}")
+                continue
+
+            found_upgrades.append({
+                "upgrade": upgrade_name,
+                "original_upgrade": upgrade_filename,
+                "position": position,
+                "rarity": rarity,
+                "confidence": confidence
+            })
+            break
+
+    if MONEY_MODE:
+        boss_upgrades = [u for u in found_upgrades if u["original_upgrade"] == "boss.png"]
+        other_upgrades = [u for u in found_upgrades if u["original_upgrade"] != "boss.png"]
+
+        boss_upgrades.sort(key=lambda u: -RARITY_ORDER.index(u["rarity"]))
+        other_upgrades.sort(key=lambda u: (
+            0 if u["original_upgrade"] in HIGH_PRIORITY else 1,
+            -RARITY_ORDER.index(u["rarity"]),
+            UPGRADE_PRIORITY.index(u["original_upgrade"])
+        ))
+
+        return boss_upgrades + other_upgrades
+
+    return sorted(found_upgrades, key=lambda u: (
+        0 if u["original_upgrade"] in HIGH_PRIORITY else 1,
+        -RARITY_ORDER.index(u["rarity"]),
+        UPGRADE_PRIORITY.index(u["original_upgrade"])
+    ))
+
+def get_rarity_from_color(card_img):
+    try:
+        height, width = card_img.shape[:2]
+        sample_region = card_img[int(height*0.56):int(height*0.57), int(width*0.9):int(width*0.95)]
+        avg_color = np.mean(sample_region, axis=(0, 1)).astype(int)
+        b, g, r = avg_color[0], avg_color[1], avg_color[2]
+        
+        closest = min(RARITY_COLORS.items(),
+                     key=lambda c: sum((c[0][i] - rgb) ** 2 for i, rgb in enumerate((r, g, b))))
+        return closest[1] if sum((closest[0][i] - rgb) ** 2 for i, rgb in enumerate((r, g, b))) < 2500 else "Unknown"
+    except Exception as e:
+        return "Unknown"
 
 def navigate_to(position_index):
     try:
-        if DEBUG:
-            log.debug(f"Attempting to navigate to position {position_index}")
+        toggle_ui_and_confirm(get_roblox_window())
+        time.sleep(0.5)
         
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('left')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('left')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('down')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('down')
+        pydirectinput.press('left')
+        pydirectinput.press('down')
         time.sleep(BUTTON_DELAY)
         
         for _ in range(position_index):
-            pydirectinput.keyDown('right')
-            time.sleep(BUTTON_DELAY/2)
-            pydirectinput.keyUp('right')
+            pydirectinput.press('right')
             time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
+            
+        pydirectinput.press('enter')
+        time.sleep(0.5)
+        pydirectinput.press(UI_TOGGLE_KEY)
         return True
-        
     except Exception as e:
         log.error(f"Navigation error: {str(e)}")
         return False
 
-def record_upgrade_purchase(upgrade_name, rarity):
-    global upgrades_purchased
-    upgrades_purchased[upgrade_name.replace('.png', '')][rarity] += 1
-    if DEBUG:
-        log.debug(f"Recorded purchase: {upgrade_name} ({rarity})")
-
-def detect_victory():
-    global last_victory_time, victory_detected, run_start_time
-    
-    try:
-        current_time = time.time()
-        if current_time - last_victory_time < 30:
-            return False
-            
-        window = get_roblox_window()
-        if not window:
-            return False
-        
-        # Get screenshot from correct monitor
-        screenshot = get_window_screenshot(window)
-        
-        template = cv2.imread(get_template_path(VICTORY_TEMPLATE))
-        if template is None:
-            return False
-            
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = cv2.minMaxLoc(res)
-        
-        time.sleep(2) # Wait for results to load
-        
-        screenshot = get_window_screenshot(window)
-        
-        if confidence > CONFIDENCE_THRESHOLD:
-            run_time = 0
-            if run_start_time > 0:
-                run_time = current_time - run_start_time
-                run_start_time = 0
-            
-            if DEBUG:
-                log.debug(f"Victory detected! (confidence: {confidence:.2f})")
-            if DISCORD_WEBHOOK_URL:
-                log.debug("Uploading screenshot and stats to Discord...")
-                if not upload_to_discord(screenshot, run_time):
-                    log.error("Failed to upload to Discord")
-            else:
-                if DEBUG:
-                    log.debug("Discord webhook URL not set, skipping upload")
-            
-            last_victory_time = current_time
-            victory_detected = True
-            return True
-            
-        return False
-        
-    except Exception as e:
-        log.error(f"Victory detection error: {str(e)}")
-        return False
-
-def generate_upgrade_summary():
-    """Generate a formatted summary of upgrades purchased this run with custom header and static column widths."""
-    if not upgrades_purchased:
-        return "No upgrades purchased this run"
-
-    # Custom header line with fixed width
-    header_line = "Upgrade         |        🔴        |        🟡         |        🟣        | 🔵 "
-
-    RARITY_EMOJIS = {
-        "Mythic": "🔴",
-        "Legendary": "🟡",
-        "Epic": "🟣",
-        "Common": "🔵"
-    }
-
-    rarities_order = ["Mythic", "Legendary", "Epic", "Common"]
-    
-    # Prepare the rows for upgrades
-    rows = []
-    for upgrade in sorted(upgrades_purchased.keys()):
-        row = [upgrade.capitalize()]
-        for rarity in rarities_order:
-            row.append(str(upgrades_purchased[upgrade].get(rarity, 0)))
-        rows.append(row)
-
-    # Calculate the totals
-    totals = ["TOTAL"]
-    for i in range(len(rarities_order)):
-        totals.append(str(sum(int(row[i+1]) for row in rows)))
-    rows.append(totals)
-
-    # Define the fixed column widths (manual width setting)
-    col_widths = [15, 2, 2, 2, 2]
-
-    # Function to format a row with the fixed column widths
-    def format_row(row):
-        return " | ".join(f"{str(cell):<{col_widths[i]}}" for i, cell in enumerate(row))
-
-    # Output the table
-    output = ["```"]
-    output.append(header_line)  # Use the manually set header line
-    output.append("----------------+----+----+----+---") # Separator line
-    for row in rows:
-        output.append(format_row(row))  # Format and add the data rows
-    output.append("```")
-
-    return "\n".join(output)
-
-def upload_to_discord(screenshot, run_time):
-    try:
-        _, img_encoded = cv2.imencode('.png', screenshot)
-        img_bytes = BytesIO(img_encoded.tobytes())
-        
-        minutes, seconds = divmod(run_time, 60)
-        time_str = f"{int(minutes):02d}:{int(seconds):02d}"
-        
-        summary = generate_upgrade_summary()
-        
-        files = {
-            'file': ('victory.png', img_bytes, 'image/png')
-        }
-        
-        payload = {
-            "content": f"Run completed in {time_str}\n{summary}",
-            "username": "AFM"
-        }
-        
-        response = requests.post(
-            DISCORD_WEBHOOK_URL,
-            data=payload,
-            files=files
-        )
-        
-        if response.status_code == 204:
-            if DEBUG:
-                log.debug("Screenshot and stats uploaded to Discord successfully")
-            return True
-        else:
-            log.error(f"Discord upload failed: {response.text}")
-            return False
-            
-    except Exception as e:
-        log.error(f"Discord upload error: {str(e)}")
-        return False
-
-def restart_run():
-    global run_start_time, victory_detected, upgrades_purchased
-    
-    log.debug("Attempting to restart run")
-    try:
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        for _ in range(3):
-            pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY)
-            pydirectinput.keyUp('down')
-            time.sleep(BUTTON_DELAY)
-            
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        run_start_time = time.time()
-        victory_detected = False
-        upgrades_purchased = defaultdict(lambda: defaultdict(int))
-        return True
-        
-    except Exception as e:
-        log.error(f"Run restart error: {str(e)}")
-        return False
-
-def is_key_pressed(key, check_hold=False):
-    """Improved key press detection with debouncing and hold detection"""
-    global last_key_press_time, key_hold_state
-    
+def prevent_afk():
+    global last_afk_action
     current_time = time.time()
     
-    # If key isn't physically pressed, reset its state
-    if not keyboard.is_pressed(key):
-        key_hold_state[key] = False
-        return False
-    
-    # Check if key is being held down
-    if check_hold and key_hold_state[key]:
-        if current_time - last_key_press_time[key] > KEY_HOLD_TIME:
-            return True
-        return False
-    
-    # Standard debounce check
-    if current_time - last_key_press_time[key] < DEBOUNCE_TIME:
-        return False
-    
-    # Valid key press detected
-    last_key_press_time[key] = current_time
-    key_hold_state[key] = True
-    return True
+    if current_time - last_afk_action > afk_interval:
+        if is_running and not is_paused:
+            log.debug("[AFK] Simulating jump")
+            pydirectinput.press('space')
+            last_afk_action = current_time
 
-def teleport_to_endless():
-    if config.get("enable_networking", False):
-        if not network.wait_for_move_turn():
-            log.error("Failed to get move turn")
-            return False
-        
-    try:
-        if DEBUG:
-            log.debug(f"Teleporting to Endless Area")
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('down')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('down')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-        
-        for _ in range(2):
-            pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
-            pydirectinput.keyUp('down')
-            time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        if config.get("enable_networking", False):
-            network.complete_move()
-        
-        return True
-        
-    except Exception as e:
-        log.error(f"Navigation error: {str(e)}")
-        return False
-
-def move_to_endless():
-    if config.get("enable_networking", False):
-        if not network.wait_for_move_turn():
-            log.error("Failed to get move turn")
-            return False
-    
-    try:
-        if DEBUG:
-            log.debug("Moving to Endless Area")
-            
-        time.sleep(1) 
-        
-        pydirectinput.keyDown('shift')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('shift')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown('right')
-        time.sleep(0.55)
-        pydirectinput.keyUp('right')
-        time.sleep(BUTTON_DELAY)
-        
-        for _ in range(2):
-            pydirectinput.keyDown('q')
-            time.sleep(BUTTON_DELAY/2)
-            pydirectinput.keyUp('q')
-            time.sleep(1)
-            
-        if config.get("enable_networking", False):
-            network.complete_move()
-        
-        return True
-        
-    except Exception as e:
-        log.error(f"Move to Endless error: {str(e)}")
-        return False
-    
-def toggle_troops():
-    try:
-        if DEBUG:
-            log.debug("Enabling Auto Troops")
-            
-        time.sleep(1)
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-
-        for _ in range(3):
-            pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
-            pydirectinput.keyUp('down')
-            time.sleep(BUTTON_DELAY)
-            
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-            
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        return True
-        
-    except Exception as e:
-        log.error(f"Auto Troops Error: {str(e)}")
-        return False
-
-def detect_disconnection():
-    global last_disconnect_check
-    try:
+def toggle_ui_and_confirm(window=None):
+    if not window:
         window = get_roblox_window()
         if not window:
-            return True
-            
-        # Check for disconnect message template
-        screenshot = get_window_screenshot(window)
-        template = cv2.imread(get_template_path(DISCONNECT_TEMPLATE))
-        if template is None:
-            return False
-            
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = cv2.minMaxLoc(res)
-        return confidence > CONFIDENCE_THRESHOLD
-        
-    except Exception as e:
-        log.error(f"Disconnect detection error: {str(e)}")
-        return False
-
-def detect_menu():
-    try:
-        window = get_roblox_window()
-        if not window:
-            return True
-            
-        # Check for disconnect message template
-        screenshot = get_window_screenshot(window)
-        template = cv2.imread(get_template_path(MENU_TEMPLATE))
-        if template is None:
-            return False
-            
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = cv2.minMaxLoc(res)
-        return confidence > CONFIDENCE_THRESHOLD
-        
-    except Exception as e:
-        log.error(f"Disconnect detection error: {str(e)}")
-        return False
-
-def launch_roblox_game():
-    """Launch game directly in Roblox player without browser tabs"""
-    try:
-        if not config["game_link"]:
+            log.warning("No Roblox window found for UI confirmation.")
             return False
 
-        roblox_url = config["game_link"]
-
-        # Platform-specific launch commands
-        if platform.system() == "Windows":
-            os.system(f'start "" "{roblox_url}"')
-        elif platform.system() == "Darwin":
-            os.system(f'open "{roblox_url}"')
-        else:
-            os.system(f'xdg-open "{roblox_url}"')
-            
-        return True
-    except Exception as e:
-        log.error(f"Game launch failed: {str(e)}")
+    template_path = get_template_path("navbox.png")
+    template = cv2.imread(template_path)
+    if template is None:
+        log.error("Failed to load navbox.png")
         return False
 
-def reconnect_to_game():
-    global reconnect_attempts
-
-    log.info("Attempting to reconnect...")
-
-    try:
-        # Launch game using stored link
-        if config["game_link"]:
-            launch_roblox_game()
-            start_time = time.time()
-
-            while True:
-                # Wait for SCAN_INTERVAL seconds before each check
-                if time.time() - start_time >= SCAN_INTERVAL:
-                    start_time = time.time()  # reset timer
-
-                    if detect_menu():
-                        log.info("Game loaded successfully")
-
-                        # Focus and press reconnect button
-                        focus_roblox_window()
-                        time.sleep(1)
-                        teleport_to_endless()
-                        time.sleep(1)
-                        move_to_endless()
-                        time.sleep(30)
-                        toggle_troops()
-                        reconnect_attempts = 0
-                        return True
-
-                time.sleep(1)  # Avoid tight looping (optional, for CPU friendliness)
-
-        return False
-
-    except Exception as e:
-        log.error(f"Reconnect failed: {str(e)}")
-        reconnect_attempts += 1
-        return False
-
-def coordinate_with_server():
-    """Handle server communication with proper error checking"""
-    try:
-        server_url = config["coordination_server"].rstrip('/')
-        
-        # Get status from server
-        response = requests.get(
-            f"{server_url}/status/{config['session_id']}",
-            headers={"X-API-Key": config["api_key"]},
-            timeout=10
-        )
-        
-        # Validate response format
-        if response.status_code == 200:
-            return response.json()
-        return {"ready_count": 0}  # Default safe value
-        
-    except Exception as e:
-        log.error(f"Server communication error: {str(e)}")
-        return {"ready_count": 0}  # Ensure consistent return type
-
-    except Exception as e:
-        log.error(f"Coordination failed: {str(e)}")
-        return False
-
-def synchronized_start():
-    global network
-    
-    if not network.config["enable_networking"]:
-        log.info("Networking disabled - starting solo run")
-        return True
-        
-    # Register player using the network manager's config
-    if not network.register_player(network.config["total_players"]):
-        log.error("Failed to register player")
-        return False
-        
-    # Mark ready
-    if not network.mark_ready():
-        log.error("Failed to mark ready")
-        return False
-        
-    log.info("Waiting for all players...")
-    
     while True:
-        status = network.check_status()
-        if not status:
-            time.sleep(5)
+        pydirectinput.press(UI_TOGGLE_KEY)
+        time.sleep(1)  # Give UI time to react
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
             continue
-            
-        log.info(f"Players ready: {status.get('ready_players', 0)}/{status.get('total_players', 4)}")
-        
-        # Check if all players are ready
-        if status.get("ready_players", 0) >= status.get("total_players", 4):
-            log.info("All players ready! Starting game...")
-            
-            # Launch game
-            launch_roblox_game()
-            
-            # Wait for game to load
-            while True:
-                if detect_menu():
-                    log.info("Game loaded - notifying server")
-                    all_loaded, move_sequence = network.mark_loaded()
-                    
-                    if all_loaded:
-                        log.info("All players loaded - starting movement sequence")
-                        return True
-                        
-                time.sleep(5)
-                
-        # Check for disconnections
-        if status.get("disconnected_players"):
-            log.error("Other players disconnected - aborting")
-            return False
-            
-        time.sleep(5)
 
-def manual_mode_loop():
-    global is_running, is_paused
-    log.info("=== Manual Mode ===")
-    log.info(f"Press {START_KEY} to scan/select | {STOP_KEY} to exit")
-    
-    while True:
-        if is_key_pressed(STOP_KEY):
-            log.info("=== Stopped ===")
-            is_running = False
-            allow_sleep()
-            break
-            
-        if is_key_pressed(PAUSE_KEY):  # Pause not used in manual mode
-            time.sleep(0.5)  # Debounce
-            
-        if is_key_pressed(START_KEY):
-            log.debug("Manual scan triggered")
-            # Perform single scan/select cycle
-            window = get_roblox_window()
-            if window:
-                upgrades = scan_for_upgrades()
-                if upgrades:
-                    if focus_roblox_window():
-                        select_best_upgrade(upgrades)
-                else:
-                    log.debug("No upgrades found")
-            # Wait for key release
-            while is_key_pressed(START_KEY):
-                time.sleep(0.1)
-            time.sleep(0.2)  # Debounce
-            
-        time.sleep(0.05)
+        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, _ = cv2.minMaxLoc(res)
+
+        if DEBUG:
+            log.debug(f"UI box detection: confidence={confidence:.2f}")
+
+        if confidence >= 0.6:
+            return True
+        else:
+            time.sleep(0.5)
+
+def detect_ui_elements_and_respond():
+    try:
+        window = get_roblox_window()
+        focus_roblox_window()
+        if not window:
+            return
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
+            return
+
+        settings_detected = template_match(screenshot, get_template_path("settings.png"))
+        lobby_detected = template_match(screenshot, get_template_path("lobby.png"))
+
+        def press_keys(keys):
+            for key in keys:
+                pydirectinput.press(key)
+                time.sleep(BUTTON_DELAY)
+
+        if settings_detected:
+            log.info("Detected settings UI.")
+            toggle_ui_and_confirm(get_roblox_window())
+            press_keys(['left'] * 2 + ['up', 'enter'])
+
+            time.sleep(1)
+            if not toggle_ui_and_confirm(window):
+                log.warning("UI not confirmed after closing settings. Retrying toggle...")
+                time.sleep(BUTTON_DELAY)
+
+        if lobby_detected:
+            log.info("Detected lobby UI.")
+            toggle_ui_and_confirm(get_roblox_window())
+            press_keys(['up'] * 5 + ['enter'])
+
+            time.sleep(1)
+            screenshot = get_window_screenshot(window)
+            if template_match(screenshot, get_template_path("lobby.png")):
+                press_keys(['down', 'enter'])
+
+    except Exception as e:
+        log.error(f"UI detection error: {e}")
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused, last_disconnect_check, last_status_check, reconnect_attempts
+    global is_running, is_paused, afk_interval
+    log.info("=== AFK Macro ===")
+    log.info(f"Money Mode: {'ACTIVE' if MONEY_MODE else 'Inactive'}")
+    log.info(f"AFK Prevention: {'ACTIVE' if AFK_PREVENTION else 'Inactive'}")
+    log.info(f"Press {START_KEY} to start | {PAUSE_KEY} to pause | {STOP_KEY} to stop")
     
-    log.info("=== AFK Endless Macro ===")
-    log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start enabled.")
-    
-    last_scan = time.time()
-    last_victory_check = time.time()
-    run_start_time = time.time()
-    victory_detected = False
-    
-    if MODE == "manual":
-        manual_mode_loop()
-        return
-    
-    # Auto-start if configured
-    if AUTO_START:
-        is_running = True
-    
+    last_scan = 0
     while True:
-        # Check for start/pause/stop keys
-        if is_key_pressed(STOP_KEY):
-            log.info("=== Stopped ===")
+        if keyboard.is_pressed(STOP_KEY):
             is_running = False
             allow_sleep()
+            log.info("=== Stopped ===")
+            time.sleep(1)
             break
             
-        if is_key_pressed(START_KEY):
+        if keyboard.is_pressed(START_KEY):
             if not is_running:
-                log.info("=== Started ===")
                 is_running = True
-                run_start_time = time.time()  # Reset timer on manual start
-            time.sleep(0.5)  # Debounce
+                prevent_sleep()
+                log.info("=== Started ===")
+            time.sleep(0.5)
             
-        if is_key_pressed(PAUSE_KEY):
+        if keyboard.is_pressed(PAUSE_KEY):
             is_paused = not is_paused
             log.info(f"=== {'Paused' if is_paused else 'Resumed'} ===")
-            time.sleep(0.5)  # Debounce
+            time.sleep(0.5)
             
-        # Disconnection check
-        if time.time() - last_disconnect_check > 60:  # Check every minute
-            if detect_disconnection() or not get_roblox_window():
-                log.error("Disconnection detected!")
-                if reconnect_attempts < config["max_reconnect_attempts"]:
-                    if reconnect_to_game():
-                        restart_run()
-                else:
-                    log.error("Max reconnect attempts reached!")
-                    is_running = False
-            last_disconnect_check = time.time()
-        
-        if network.config("enable_networking", False) and time.time() - last_status_check > 30:
-            status = network.check_status()
-            if status and status.get("disconnected_players"):
-                log.error("Other players disconnected - restarting")
-                if network.mark_disconnected():
-                    restart_run()
-                continue
-            last_status_check = time.time()
-            
-        if network.config["enable_networking"]:
-            # Send periodic pings
-            if time.time() - network.last_ping_time > network.ping_interval:
-                network.send_ping()
-                
-        if config.get("enable_networking", False):
-            if not network.synchronized_start():
-                log.error("Network startup failed, running solo")
-                main_loop()
-        else:
-            main_loop()
-            
-        # Only run logic when active and not paused
         if is_running and not is_paused:
-            prevent_sleep()   
             current_time = time.time()
             
-            # Victory check
-            if current_time - last_victory_check > SCAN_INTERVAL:
-                if detect_victory():
-                    if victory_detected:
-                        restart_run()
-                last_victory_check = current_time
-                
-            # Upgrade scanning
+            if AFK_PREVENTION:
+                prevent_afk()
+            
             if current_time - last_scan > SCAN_INTERVAL:
-                window = get_roblox_window()  # Get window without focusing
+                window = get_roblox_window()
                 if window:
+                    detect_ui_elements_and_respond()
                     upgrades = scan_for_upgrades()
                     if upgrades:
-                        if focus_roblox_window():  # Only focus when we have upgrades to select
-                            select_best_upgrade(upgrades)
-                            last_scan = time.time()
-                        else:
-                            last_scan = time.time() + 2
-                    else:
-                        if DEBUG:
-                            log.debug("No upgrades found, waiting...")
-                        last_scan = time.time() + 2
+                        focus_roblox_window()
+                        if navigate_to(upgrades[0]['position']):
+                            log.info(f"Selected {upgrades[0]['upgrade']} ({upgrades[0]['rarity']})")
+                            upgrades_purchased[upgrades[0]['upgrade']][upgrades[0]['rarity']] += 1
+                    last_scan = current_time
                 else:
-                    last_scan = time.time() + 1
-        else:
-            allow_sleep()  # Allow system sleep when paused/stopped
-            time.sleep(0.1)  # Reduce CPU usage
+                    last_scan = current_time + 1
 
 if __name__ == "__main__":
-    #synchronized_start()
-    #reconnect_to_game()
     main_loop()
