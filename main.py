@@ -1,7 +1,6 @@
 import time
 import pydirectinput
 import keyboard
-import pyautogui
 import cv2
 import numpy as np
 import pygetwindow as gw
@@ -12,19 +11,21 @@ import platform
 import ctypes
 import logging
 import mss
+import threading
+import random
+import gc
 from logging.handlers import RotatingFileHandler
 from io import BytesIO
-from datetime import datetime
 from collections import defaultdict
 
 DEFAULT_CONFIG = {
+    "ultrawide_mode": False,
     "scan_interval": 5,
     "start_key": "F6",
     "pause_key": "F7",
     "stop_key": "F8",
+    "afk_prevention": True,
     "auto_start": False,
-    "webhook_url": "",
-    "mode": "auto",
     "money_mode": False,
     "button_delay": 0.2,
     "high_priority": [
@@ -42,6 +43,7 @@ DEFAULT_CONFIG = {
         "jade",
         "enemy"
     ],
+    "webhook_url": "",
     "debug": False
 }
 
@@ -62,12 +64,14 @@ def add_png_suffix(items):
     return [f"{item}.png" if not item.endswith('.png') else item for item in items]
 
 config = load_config()
+ULTRAWIDE_MODE = config.get("ultrawide_mode", False)
 AUTO_START = config.get("auto_start", False)
 SCAN_INTERVAL = config.get("scan_interval", 5)
 BUTTON_DELAY = config.get("button_delay", 0.2)
 START_KEY = config.get("start_key", "f6")
 PAUSE_KEY = config.get("pause_key", "f7")
 STOP_KEY = config.get("stop_key", "f8")
+AFK_PREVENTION = config.get("afk_prevention", True)
 DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
 HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_priority"]))
@@ -75,25 +79,18 @@ LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_pri
 UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 MONEY_MODE = config.get("money_mode", False)
 
-MODE = config.get("mode", "auto")
-
 IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.8
 UI_TOGGLE_KEY = '\\'
-DEBOUNCE_TIME = 0.3
-KEY_HOLD_TIME = 0.3
 
-# State variables
 last_victory_time = 0
 run_start_time = 0
 victory_detected = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
-last_key_press_time = defaultdict(float)
-key_hold_state = defaultdict(bool)
 
-IMAGE_FOLDER = "images"
+IMAGE_FOLDER = "ultrawide" if ULTRAWIDE_MODE else "images"
 
 VICTORY_TEMPLATE = "victory.png"
 DISCONNECT_TEMPLATE = "disconnected.png"
@@ -129,33 +126,77 @@ else:
     def allow_sleep():
         pass
 
+class AFKPreventionThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = False
+
+    def run(self):
+        self.running = True
+        while self.running:
+            if is_running and not is_paused:
+                log.debug("[AFK] Simulating jump")
+                pydirectinput.keyDown('space')
+                time.sleep(0.1)
+                pydirectinput.keyUp('space')
+            time.sleep(random.randint(600, 900))  # 10 to 15 mins
+
+    def stop(self):
+        self.running = False
+
+class KeyListenerThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = True
+        self.last_pressed = {}
+
+    def check_key(self, key, action):
+        if keyboard.is_pressed(key):
+            if not self.last_pressed.get(key, False):
+                action()
+                self.last_pressed[key] = True
+        else:
+            self.last_pressed[key] = False
+
+    def run(self):
+        global is_running, is_paused
+
+        while self.running:
+            self.check_key(START_KEY, self.start_script)
+            self.check_key(PAUSE_KEY, self.toggle_pause)
+            self.check_key(STOP_KEY, self.stop_script)
+            time.sleep(0.05)
+
+    def start_script(self):
+        global is_running
+        if not is_running:
+            is_running = True
+            log.info("[Keybind] Script started")
+
+    def toggle_pause(self):
+        global is_paused
+        is_paused = not is_paused
+        log.info(f"[Keybind] Script {'paused' if is_paused else 'resumed'}")
+
+    def stop_script(self):
+        global is_running
+        is_running = False
+        self.running = False
+        log.info("[Keybind] Script stopped")
+        os._exit(0)
+
 def setup_logging():
-    # Clear previous log file on startup
     with open('afm_macro.log', 'w'):
         pass
     
-    # Create logger
     logger = logging.getLogger('AFM')
     logger.setLevel(logging.DEBUG)
     
-    # File handler (rotates when reaches 1MB)
-    file_handler = RotatingFileHandler(
-        'afm_macro.log', 
-        maxBytes=1024*1024, 
-        backupCount=3,
-        encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '[%(asctime)s] %(levelname)s: %(message)s',
-        datefmt='%H:%M:%S'
-    ))
+    file_handler = RotatingFileHandler('afm_macro.log', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S'))
     
-    # Console handler (for real-time output)
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        '[%(asctime)s] %(message)s',
-        datefmt='%H:%M:%S'
-    ))
+    console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%H:%M:%S'))
     
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
@@ -194,13 +235,11 @@ def get_roblox_window():
             
         window = roblox_windows[0]
         
-        # Refresh window dimensions
         window.left = window._rect.left
         window.top = window._rect.top
         window.width = window._rect.width
         window.height = window._rect.height
         
-        # Verify window is visible and has reasonable dimensions
         if window.width < 100 or window.height < 100:
             if DEBUG:
                 log.warning(f"Window too small: {window.width}x{window.height}")
@@ -220,7 +259,6 @@ def get_window_screenshot(window):
         
     try:
         with mss.mss() as sct:
-            # Get exact window coordinates including borders
             monitor = {
                 "left": window.left,
                 "top": window.top,
@@ -228,11 +266,9 @@ def get_window_screenshot(window):
                 "height": window.height,
             }
             
-            # Grab the image
             sct_img = sct.grab(monitor)
             img = np.array(sct_img)
             
-            # Convert color space and return
             return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             
     except Exception as e:
@@ -247,15 +283,12 @@ def resize_to_template(screenshot, template):
 
 def scale_to_window(image, window_height):
     """Scale templates relative to window size"""
-    # Base template height (assuming templates made at 1080p)
     BASE_HEIGHT = 1080
     scale_factor = window_height / BASE_HEIGHT
     
-    # Calculate new dimensions
     width = int(image.shape[1] * scale_factor)
     height = int(image.shape[0] * scale_factor)
     
-    # Scale the image
     return cv2.resize(image, (width, height))
 
 def match_template_in_window(screenshot, template_name):
@@ -265,28 +298,14 @@ def match_template_in_window(screenshot, template_name):
     if template is None:
         return 0.0, (0, 0)
         
-    # Scale template relative to window size
     window_height = screenshot.shape[0]
     scale_factor = window_height / 1080  # Assuming 1080p base resolution
     new_width = int(template.shape[1] * scale_factor)
     new_height = int(template.shape[0] * scale_factor)
     template = cv2.resize(template, (new_width, new_height))
     
-    # Perform matching
     res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
-    
-    # Debug visualization
-    if DEBUG and max_val > 0.5:
-        debug_img = screenshot.copy()
-        cv2.rectangle(debug_img,
-                     max_loc,
-                     (max_loc[0] + new_width, max_loc[1] + new_height),
-                     (0, 255, 0), 2)
-        cv2.putText(debug_img, f"{template_name} {max_val:.2f}",
-                   (max_loc[0], max_loc[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                   (0, 255, 0), 1)
     
     return max_val, max_loc
 
@@ -302,7 +321,6 @@ def scan_for_upgrades(max_attempts=3):
                 attempts += 1
                 continue
                 
-            # Get window screenshot
             screenshot = get_window_screenshot(window)
             if screenshot is None:
                 attempts += 1
@@ -311,12 +329,10 @@ def scan_for_upgrades(max_attempts=3):
             window_height = screenshot.shape[0]
             window_width = screenshot.shape[1]
             
-            # Dynamic card dimensions
             card_width = int(window_width * 0.18)
             gap = int(window_width * 0.03)
             first_card_left = (window_width // 2) - int((card_width + gap) * 1.45)
             
-            # Define card regions
             regions = [
                 (first_card_left, 0, card_width, window_height),
                 (first_card_left + card_width + gap, 0, card_width, window_height),
@@ -327,24 +343,19 @@ def scan_for_upgrades(max_attempts=3):
             
             for position, (x, y, w, h) in enumerate(regions):
                 try:
-                    # Crop card region
                     card_img = screenshot[y:y+h, x:x+w]
                     
-                    # Check each upgrade type
                     for upgrade in UPGRADE_PRIORITY:
                         template = cv2.imread(get_template_path(upgrade))
                         if template is None:
                             continue
                             
-                        # Scale template to window size
                         scaled_template = scale_to_window(template, window_height)
                         
-                        # Match template
                         res = cv2.matchTemplate(card_img, scaled_template, cv2.TM_CCOEFF_NORMED)
                         _, confidence, _, _ = cv2.minMaxLoc(res)
                         
                         if confidence >= CONFIDENCE_THRESHOLD:
-                            # Found a match!
                             rarity = get_rarity_from_color(card_img, position)
                             is_percent = is_percent_upgrade(card_img, position)
                             
@@ -377,24 +388,19 @@ def get_rarity_from_color(card_img, position):
     try:
         height, width = card_img.shape[:2]
         
-        # Dynamic rarity color detection
         scan_x = int(width * 0.9)
         y_base = int(height * 0.57)
         
-        # Sample width 
         sample_width = 10
         
-        # Ensure we don't go out of bounds
         if scan_x + sample_width > width:
             scan_x = width - sample_width - 1
         
-        # Define the scan region (5px tall, sample_width px wide)
         sample_region = card_img[
             y_base - 2 : y_base + 3,
             scan_x : scan_x + sample_width
         ]
         
-        # Get average color (BGR → RGB for comparison)
         avg_color = np.mean(sample_region, axis=(0, 1)).astype(int)
         r, g, b = avg_color[2], avg_color[1], avg_color[0]  # Convert to (R, G, B)
         rgb_color = (r, g, b)
@@ -402,7 +408,6 @@ def get_rarity_from_color(card_img, position):
         if DEBUG:
             log.debug(f"Position {position} | Scanned at X={scan_x} | Color: {rgb_color}")
         
-        # Find the closest rarity match
         closest_match = "Unknown"
         min_distance = float('inf')
         
@@ -435,7 +440,6 @@ def is_percent_upgrade(card_img, position):
                         log.debug(f"Percent detected (template1) at position {position} with confidence {confidence1:.2f}")
                     return True
 
-        # Check second percent template only if file exists
         template2_path = get_template_path("percent2.png")
         if os.path.exists(template2_path):
             template2 = cv2.imread(template2_path)
@@ -447,8 +451,6 @@ def is_percent_upgrade(card_img, position):
                     if DEBUG:
                         log.debug(f"Percent detected (template2) at position {position} with confidence {confidence2:.2f}")
                     return True
-        elif DEBUG:
-            log.debug("percent2.png not found, skipping check")
 
         if DEBUG:
             conf1 = confidence1 if 'confidence1' in locals() else 'N/A'
@@ -466,16 +468,13 @@ def select_best_upgrade(upgrades):
         log.debug("No upgrades detected")
         return False
 
-    # First filter out unwanted upgrades
     valid_upgrades = []
     for upgrade in upgrades:
-        # Skip Common unit upgrades
         if "unit" in upgrade['upgrade'].lower() and upgrade['rarity'] == "Common":
             if DEBUG:
                 log.debug(f"Skipping Common unit upgrade: {upgrade['upgrade']} at pos {upgrade['position']}")
             continue
             
-        # Skip flat ATK/HP upgrades (non-percent)
         if (upgrade['original_upgrade'] in ['atk.png', 'health.png'] and 
             not upgrade.get('is_percent', False)):
             if DEBUG:
@@ -484,7 +483,6 @@ def select_best_upgrade(upgrades):
             
         valid_upgrades.append(upgrade)
     
-    # Fail-safe if no valid upgrades
     if not valid_upgrades:
         log.debug("No valid upgrades after filtering - using fail-safe")
         for upgrade in upgrades:
@@ -496,7 +494,6 @@ def select_best_upgrade(upgrades):
         return False
 
     if MONEY_MODE:
-        # Split into boss and non-boss upgrades
         boss_upgrades = []
         other_upgrades = []
         
@@ -506,22 +503,12 @@ def select_best_upgrade(upgrades):
             else:
                 other_upgrades.append(upgrade)
         
-        # Sort boss upgrades by highest rarity first, then original priority
-        boss_upgrades.sort(key=lambda x: (
-            -RARITY_ORDER.index(x['rarity']),
-            UPGRADE_PRIORITY.index(x['original_upgrade'])
-        ))
+        boss_upgrades.sort(key=lambda x: (-RARITY_ORDER.index(x['rarity']), UPGRADE_PRIORITY.index(x['original_upgrade'])))
         
-        # Sort other upgrades normally
-        other_upgrades.sort(key=lambda x: (
-            0 if x['original_upgrade'] in HIGH_PRIORITY else 1,
-            -RARITY_ORDER.index(x['rarity']),
-            UPGRADE_PRIORITY.index(x['original_upgrade'])
-        ))
+        other_upgrades.sort(key=lambda x: (0 if x['original_upgrade'] in HIGH_PRIORITY else 1, -RARITY_ORDER.index(x['rarity']), UPGRADE_PRIORITY.index(x['original_upgrade'])))
         
         valid_upgrades = boss_upgrades + other_upgrades
     else:
-        # Original sorting logic
         def get_sort_key(upgrade):
             if upgrade['original_upgrade'] in HIGH_PRIORITY:
                 group = 0
@@ -536,17 +523,12 @@ def select_best_upgrade(upgrades):
 
     if not MONEY_MODE:
         def get_sort_key(upgrade):
-            # Check if the upgrade is in the high priority group
             if upgrade['original_upgrade'] in HIGH_PRIORITY:
                 group = 0  # High priority
             else:
                 group = 1  # Low priority
 
-            return (
-                group,
-                -RARITY_ORDER.index(upgrade['rarity']),
-                UPGRADE_PRIORITY.index(upgrade['original_upgrade'])
-            )
+            return (group, -RARITY_ORDER.index(upgrade['rarity']), UPGRADE_PRIORITY.index(upgrade['original_upgrade']))
 
         valid_upgrades.sort(key=get_sort_key)
 
@@ -554,11 +536,9 @@ def select_best_upgrade(upgrades):
         log.debug("Valid upgrades sorted:")
         for idx, upgrade in enumerate(valid_upgrades, 1):
             perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
-            # Determine group for debug display
             group = "HIGH" if UPGRADE_PRIORITY.index(upgrade['original_upgrade']) < 6 else "LOW"
             log.debug(f"{idx}. [{group}] {upgrade['upgrade']}{perc} ({upgrade['rarity']}) at pos {upgrade['position']}")
 
-    # Try to select best upgrade
     for upgrade in valid_upgrades:
         perc = " (PERCENT)" if upgrade.get('is_percent', False) else ""
         if DEBUG:
@@ -631,19 +611,18 @@ def detect_victory():
         if not window:
             return False
         
-        # Get screenshot from correct monitor
         screenshot = get_window_screenshot(window)
         
         template = cv2.imread(get_template_path(VICTORY_TEMPLATE))
         if template is None:
             return False
         
-        template = scale_to_window(template, screenshot.shape[0])  # Use same scaling as upgrades
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-        
+        resized_screen = resize_to_template(screenshot, template)
+        res = cv2.matchTemplate(resized_screen, template, cv2.TM_CCOEFF_NORMED)
+            
         _, confidence, _, _ = cv2.minMaxLoc(res)
         
-        time.sleep(2) # Wait for results to load
+        time.sleep(1) # Wait for results to load
         
         screenshot = get_window_screenshot(window)
         
@@ -678,7 +657,6 @@ def generate_upgrade_summary():
     if not upgrades_purchased:
         return "No upgrades purchased this run"
 
-    # Custom header line with fixed width
     header_line = "Upgrade         |        🔴        |        🟡         |        🟣        | 🔵 "
 
     RARITY_EMOJIS = {
@@ -690,7 +668,6 @@ def generate_upgrade_summary():
 
     rarities_order = ["Mythic", "Legendary", "Epic", "Common"]
     
-    # Prepare the rows for upgrades
     rows = []
     for upgrade in sorted(upgrades_purchased.keys()):
         row = [upgrade.capitalize()]
@@ -698,20 +675,16 @@ def generate_upgrade_summary():
             row.append(str(upgrades_purchased[upgrade].get(rarity, 0)))
         rows.append(row)
 
-    # Calculate the totals
     totals = ["TOTAL"]
     for i in range(len(rarities_order)):
         totals.append(str(sum(int(row[i+1]) for row in rows)))
     rows.append(totals)
 
-    # Define the fixed column widths (manual width setting)
     col_widths = [15, 2, 2, 2, 2]
 
-    # Function to format a row with the fixed column widths
     def format_row(row):
         return " | ".join(f"{str(cell):<{col_widths[i]}}" for i, cell in enumerate(row))
 
-    # Output the table
     output = ["```"]
     output.append(header_line)  # Use the manually set header line
     output.append("----------------+----+----+----+---") # Separator line
@@ -794,72 +767,13 @@ def restart_run():
         log.error(f"Run restart error: {str(e)}")
         return False
 
-def is_key_pressed(key, check_hold=False):
-    """Improved key press detection with debouncing and hold detection"""
-    global last_key_press_time, key_hold_state
-    
-    current_time = time.time()
-    
-    # If key isn't physically pressed, reset its state
-    if not keyboard.is_pressed(key):
-        key_hold_state[key] = False
-        return False
-    
-    # Check if key is being held down
-    if check_hold and key_hold_state[key]:
-        if current_time - last_key_press_time[key] > KEY_HOLD_TIME:
-            return True
-        return False
-    
-    # Standard debounce check
-    if current_time - last_key_press_time[key] < DEBOUNCE_TIME:
-        return False
-    
-    # Valid key press detected
-    last_key_press_time[key] = current_time
-    key_hold_state[key] = True
-    return True
-
-def manual_mode_loop():
-    global is_running, is_paused
-    log.info("=== Manual Mode ===")
-    log.info(f"Press {START_KEY} to scan/select | {STOP_KEY} to exit")
-    
-    while True:
-        if is_key_pressed(STOP_KEY):
-            log.info("=== Stopped ===")
-            is_running = False
-            allow_sleep()
-            break
-            
-        if is_key_pressed(PAUSE_KEY):  # Pause not used in manual mode
-            time.sleep(0.5)  # Debounce
-            
-        if is_key_pressed(START_KEY):
-            log.debug("Manual scan triggered")
-            # Perform single scan/select cycle
-            window = get_roblox_window()
-            if window:
-                upgrades = scan_for_upgrades()
-                if upgrades:
-                    if focus_roblox_window():
-                        select_best_upgrade(upgrades)
-                else:
-                    log.debug("No upgrades found")
-            # Wait for key release
-            while is_key_pressed(START_KEY):
-                time.sleep(0.1)
-            time.sleep(0.2)  # Debounce
-            
-        time.sleep(0.05)
-
 def main_loop():
     global run_start_time, victory_detected, is_running, is_paused
     
     log.info("=== AFK Endless Macro ===")
-    log.info(f"Mode: {MODE.capitalize()} Scan | Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
+    log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
     log.info(f"Press {PAUSE_KEY} to pause/resume | {STOP_KEY} to stop")
-    log.info(f"Money Mode: {'ENABLED' if MONEY_MODE else 'disabled'}")
+    log.info(f"Money Mode: {'ENABLED' if MONEY_MODE else 'Disabled'}")
     log.info(f"High priority upgrades: {', '.join([upgrade.replace('.png', '') for upgrade in HIGH_PRIORITY])}")
     log.info(f"Low priority upgrades: {', '.join([upgrade.replace('.png', '') for upgrade in LOW_PRIORITY])}")
     
@@ -868,66 +782,66 @@ def main_loop():
     run_start_time = time.time()
     victory_detected = False
     
-    if MODE == "manual":
-        manual_mode_loop()
-        return
+    key_thread = KeyListenerThread()
+    key_thread.start()
     
-    # Auto-start if configured
     if AUTO_START:
         is_running = True
     
-    while True:
-        # Check for start/pause/stop keys
-        if is_key_pressed(STOP_KEY):
-            log.info("=== Stopped ===")
-            is_running = False
-            allow_sleep()
-            break
+    afk_thread = None
+    if AFK_PREVENTION:
+        afk_thread = AFKPreventionThread()
+        afk_thread.start()
+    
+    try:
+        while True:
             
-        if is_key_pressed(START_KEY):
-            if not is_running:
-                log.info("=== Started ===")
-                is_running = True
-                run_start_time = time.time()  # Reset timer on manual start
-            time.sleep(0.5)  # Debounce
-            
-        if is_key_pressed(PAUSE_KEY):
-            is_paused = not is_paused
-            log.info(f"=== {'Paused' if is_paused else 'Resumed'} ===")
-            time.sleep(0.5)  # Debounce
-        
-        # Only run logic when active and not paused
-        if is_running and not is_paused:
-            prevent_sleep()   
-            current_time = time.time()
-            
-            # Victory check
-            if current_time - last_victory_check > SCAN_INTERVAL:
-                if detect_victory():
-                    if victory_detected:
-                        restart_run()
-                last_victory_check = current_time
+            if is_running and not is_paused:
+                prevent_sleep()   
+                current_time = time.time()
                 
-            # Upgrade scanning
-            if current_time - last_scan > SCAN_INTERVAL:
-                window = get_roblox_window()  # Get window without focusing
-                if window:
-                    upgrades = scan_for_upgrades()
-                    if upgrades:
-                        if focus_roblox_window():  # Only focus when we have upgrades to select
-                            select_best_upgrade(upgrades)
-                            last_scan = time.time()
+                if current_time - last_victory_check > SCAN_INTERVAL:
+                    if detect_victory():
+                        if victory_detected:
+                            restart_run()
+                    last_victory_check = current_time
+                    
+                if current_time - last_scan > SCAN_INTERVAL:
+                    window = get_roblox_window()  # Get window without focusing
+                    if window:
+                        upgrades = scan_for_upgrades()
+                        if upgrades:
+                            if focus_roblox_window():  # Only focus when we have upgrades to select
+                                select_best_upgrade(upgrades)
+                                last_scan = time.time()
+                            else:
+                                last_scan = time.time() + 2
                         else:
+                            if DEBUG:
+                                log.debug("No upgrades found, waiting...")
                             last_scan = time.time() + 2
                     else:
-                        if DEBUG:
-                            log.debug("No upgrades found, waiting...")
-                        last_scan = time.time() + 2
-                else:
-                    last_scan = time.time() + 1
-        else:
-            allow_sleep()  # Allow system sleep when paused/stopped
-            time.sleep(0.1)  # Reduce CPU usage
+                        last_scan = time.time() + 1
+                        
+            if int(time.time()) % 30 == 0:
+                gc.collect()
+                
+            else:
+                allow_sleep()  # Allow system sleep when paused/stopped
+                time.sleep(0.1)  # Reduce CPU usage
+                
+    except KeyboardInterrupt:
+        log.info("Shutting down...")
+    
+    finally:
+        key_thread.running = False
+        key_thread.join(timeout=2)
+        
+        if afk_thread:
+            afk_thread.stop()
+            afk_thread.join(timeout=2)
+        
+        allow_sleep()
 
 if __name__ == "__main__":
     main_loop()
