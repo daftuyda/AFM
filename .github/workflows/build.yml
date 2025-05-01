@@ -1,15 +1,21 @@
-name: Build Workflow
+name: Build and Release AFM Macro
 
 on:
   push:
-    # branches: [ master ]
+    branches: [ lite ]
 
 jobs:
   build-windows:
     runs-on: windows-2019
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Read version from file
+        id: version
+        run: |
+          echo "VERSION=$(Get-Content version.txt)" >> $env:GITHUB_ENV
 
       - name: Install Python
         uses: actions/setup-python@v4
@@ -17,7 +23,7 @@ jobs:
           python-version: '3.12'
           architecture: 'x64'
 
-      - name: Install requirements
+      - name: Install build requirements
         run: |
           pip install -r build-requirements.txt
 
@@ -25,35 +31,28 @@ jobs:
         run: |
           python -m PyInstaller AFM.spec
 
-      # Create a zip file with both the exe and images folder
       - name: Create distribution zip
         run: |
-          mkdir -p package
-          cp -r dist/AFM.exe package/
+          mkdir package
+          cp dist/AFM.exe package/
           cp -r images package/
+          cp -r ultrawide package/
           Compress-Archive -Path package/* -DestinationPath AFM.zip -Force
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows_daftuyda
-          path: AFM.zip
-
-      - name: Create Release
+      - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v1.0
-          release_name: AFM Endless Macro - v1.0
+          tag_name: ${{ env.VERSION }}
+          release_name: AFM Endless Macro - ${{ env.VERSION }}
           body: |
-            Initial release.
-          draft: true
+            Release version ${{ env.VERSION }}
+          draft: false
           prerelease: false
 
-      - name: Upload Release Asset
-        id: upload-release-asset
+      - name: Upload ZIP to Release
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,3 +61,13 @@ jobs:
           asset_path: AFM.zip
           asset_name: AFM.zip
           asset_content_type: application/zip
+
+      - name: Upload EXE to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/AFM.exe
+          asset_name: AFM.exe
+          asset_content_type: application/octet-stream

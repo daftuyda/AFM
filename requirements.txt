@@ -1,9 +1,7 @@
 keyboard
+mss
 numpy
 opencv_python
-pyautogui
 PyDirectInput
 PyGetWindow
 Requests
-Pillow
-mss
