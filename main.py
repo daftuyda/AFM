@@ -18,6 +18,8 @@ from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from collections import defaultdict
 
+pydirectinput.FAILSAFE = False
+
 DEFAULT_CONFIG = {
     "ultrawide_mode": False,
     "scan_interval": 5,
@@ -27,6 +29,7 @@ DEFAULT_CONFIG = {
     "afk_prevention": True,
     "auto_start": False,
     "money_mode": False,
+    "wave_threshold": 120,
     "button_delay": 0.2,
     "high_priority": [
         "regen",
@@ -78,9 +81,10 @@ HIGH_PRIORITY = add_png_suffix(config.get("high_priority", DEFAULT_CONFIG["high_
 LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_priority"]))
 UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 MONEY_MODE = config.get("money_mode", False)
+WAVE_THRESHOLD = config.get("wave_threshold", 120)
 
 IMAGE_FOLDER = "images"
-CONFIDENCE_THRESHOLD = 0.8
+CONFIDENCE_THRESHOLD = 0.7
 UI_TOGGLE_KEY = '\\'
 
 last_victory_time = 0
@@ -205,7 +209,6 @@ def setup_logging():
 log = setup_logging()
 
 def get_template_path(filename):
-    """Helper function to get correct template path"""
     return os.path.join(IMAGE_FOLDER, filename) if IMAGE_FOLDER else filename
 
 def focus_roblox_window():
@@ -225,7 +228,6 @@ def focus_roblox_window():
     return None
 
 def get_roblox_window():
-    """Get Roblox window dimensions without focusing, with multi-monitor support"""
     try:
         roblox_windows = gw.getWindowsWithTitle("Roblox")
         if not roblox_windows:
@@ -282,7 +284,6 @@ def resize_to_template(screenshot, template):
     return cv2.resize(screenshot, (int(w*scale), int(h*scale)))
 
 def scale_to_window(image, window_height):
-    """Scale templates relative to window size"""
     BASE_HEIGHT = 1080
     scale_factor = window_height / BASE_HEIGHT
     
@@ -292,7 +293,6 @@ def scale_to_window(image, window_height):
     return cv2.resize(image, (width, height))
 
 def match_template_in_window(screenshot, template_name):
-    """Helper function for template matching that accounts for window size"""
     template_path = get_template_path(template_name)
     template = cv2.imread(template_path)
     if template is None:
@@ -427,7 +427,6 @@ def get_rarity_from_color(card_img, position):
 
 def is_percent_upgrade(card_img, position):
     try:
-        # Check first percent template
         template1_path = get_template_path("percent.png")
         if os.path.exists(template1_path):
             template1 = cv2.imread(template1_path)
@@ -551,39 +550,84 @@ def select_best_upgrade(upgrades):
 
     return False
 
+def toggle_ui_and_confirm(window=None, max_attempts=2):
+    if not window:
+        window = get_roblox_window()
+        if not window:
+            log.warning("No Roblox window found for UI confirmation.")
+            return False
+
+    template_path = get_template_path("navbox.png")
+    if not os.path.exists(template_path):
+        log.warning("navbox.png not found — skipping UI toggle check.")
+        return True
+
+    template = cv2.imread(template_path)
+    if template is None:
+        log.error("Failed to load navbox.png")
+        return False
+
+    success = False
+    for attempt in range(max_attempts):
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(1.2 if attempt == 0 else 1)
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
+            continue
+
+        scaled_template = scale_to_window(template, screenshot.shape[0])
+        res = cv2.matchTemplate(screenshot, scaled_template, cv2.TM_CCOEFF_NORMED)
+        _, confidence, _, _ = cv2.minMaxLoc(res)
+
+        if DEBUG:
+            log.debug(f"UI box detection attempt {attempt + 1}: confidence={confidence:.2f}")
+
+        if confidence >= 0.6:
+            success = True
+            break
+
+    if not success:
+        log.warning("UI nav box not detected after all attempts — sending one last UI toggle just in case.")
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+
+    return True
+
 def navigate_to(position_index):
     try:
         if DEBUG:
             log.debug(f"Attempting to navigate to position {position_index}")
         
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
+        toggle_ui_and_confirm()
         
         pydirectinput.keyDown('left')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(BUTTON_DELAY)
         pydirectinput.keyUp('left')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('down')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(BUTTON_DELAY)
         pydirectinput.keyUp('down')
         time.sleep(BUTTON_DELAY)
         
         for _ in range(position_index):
             pydirectinput.keyDown('right')
-            time.sleep(BUTTON_DELAY/2)
+            time.sleep(BUTTON_DELAY)
             pydirectinput.keyUp('right')
             time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(BUTTON_DELAY)
         pydirectinput.keyUp('enter')
         time.sleep(BUTTON_DELAY)
         
         pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
+        time.sleep(BUTTON_DELAY)
         pydirectinput.keyUp(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         
@@ -592,6 +636,83 @@ def navigate_to(position_index):
     except Exception as e:
         log.error(f"Navigation error: {str(e)}")
         return False
+
+def get_current_wave_number(last_wave=None):
+    window = get_roblox_window()
+    if not window:
+        return None
+
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return None
+
+    gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+
+    h, w = gray.shape
+    x = int(w * 680 / 1920)
+    y = int(h * 45 / 1080)
+    roi_w = int(w * 70 / 1920)
+    roi_h = int(h * 35 / 1080)
+    roi = gray[y:y+roi_h, x:x+roi_w]
+
+    roi = cv2.equalizeHist(roi)
+    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    _, roi = cv2.threshold(roi, 150, 255, cv2.THRESH_BINARY)
+
+    h_roi, w_roi = roi.shape
+    heatmap = np.zeros((h_roi, w_roi), dtype=np.float32)
+    digit_map = np.full((h_roi, w_roi), -1, dtype=np.int32)
+
+    for digit in reversed(range(10)):  # Try 9 down to 0
+        template_path = os.path.join("numbers", f"{digit}.png")
+        template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+        if template is None:
+            continue
+
+        th, tw = template.shape
+        res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+
+        for y_res in range(res.shape[0]):
+            for x_res in range(res.shape[1]):
+                score = res[y_res, x_res]
+                if score > heatmap[y_res, x_res]:
+                    heatmap[y_res, x_res] = score
+                    digit_map[y_res, x_res] = digit
+
+    threshold = 0.65
+    matches = []
+    for y_scan in range(digit_map.shape[0]):
+        for x_scan in range(digit_map.shape[1]):
+            digit = digit_map[y_scan, x_scan]
+            score = heatmap[y_scan, x_scan]
+
+            if digit != -1 and score >= threshold:
+                matches.append((x_scan, digit, score))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda m: m[0])
+
+    filtered = []
+    last_x = -999
+    for x_pos, digit, score in matches:
+        if x_pos - last_x > 10:
+            filtered.append((x_pos, digit, score))
+            last_x = x_pos
+
+    digits = [str(d) for _, d, _ in filtered]
+
+    if DEBUG:
+        digits_str = "".join([str(d) for (_, d, _) in filtered])
+        log.debug(f"Matched digits: {digits_str}")
+
+    try:
+        wave = int("".join(digits))       
+        return wave
+    
+    except ValueError:
+        return None
 
 def record_upgrade_purchase(upgrade_name, rarity):
     global upgrades_purchased
@@ -617,8 +738,8 @@ def detect_victory():
         if template is None:
             return False
         
-        resized_screen = resize_to_template(screenshot, template)
-        res = cv2.matchTemplate(resized_screen, template, cv2.TM_CCOEFF_NORMED)
+        template = scale_to_window(template, screenshot.shape[0])
+        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
             
         _, confidence, _, _ = cv2.minMaxLoc(res)
         
@@ -653,7 +774,6 @@ def detect_victory():
         return False
 
 def generate_upgrade_summary():
-    """Generate a formatted summary of upgrades purchased this run with custom header and static column widths."""
     if not upgrades_purchased:
         return "No upgrades purchased this run"
 
@@ -731,33 +851,71 @@ def upload_to_discord(screenshot, run_time):
         log.error(f"Discord upload error: {str(e)}")
         return False
 
+def detect_ui_elements_and_respond():
+    try:
+        window = get_roblox_window()
+        if not window:
+            return
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
+            return
+
+        settings_conf, _ = match_template_in_window(screenshot, "settings.png")
+        settings_detected = settings_conf >= CONFIDENCE_THRESHOLD
+
+        lobby_conf, _ = match_template_in_window(screenshot, "lobby.png")
+        lobby_detected = lobby_conf >= CONFIDENCE_THRESHOLD
+
+        if settings_detected:
+            log.info("Detected settings UI. Toggling UI.")
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+            for _ in range(3):
+                pydirectinput.press('left')
+                time.sleep(BUTTON_DELAY)
+            
+            pydirectinput.press('up')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+
+        if lobby_detected:
+            log.info("Detected lobby UI. Attempting to escape.")
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+            for _ in range(6):
+                pydirectinput.press('left')
+                time.sleep(BUTTON_DELAY)
+            
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+            
+            time.sleep(1)
+            screenshot = get_window_screenshot(window)
+            if screenshot is not None:
+                lobby_conf, _ = match_template_in_window(screenshot, "lobby.png")
+                if lobby_conf >= CONFIDENCE_THRESHOLD:
+                    pydirectinput.press('down')
+                    time.sleep(BUTTON_DELAY)
+                    pydirectinput.press('right')
+                    time.sleep(BUTTON_DELAY)
+                    pydirectinput.press('enter')
+                    time.sleep(BUTTON_DELAY)
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+        
+
+    except Exception as e:
+        log.error(f"UI detection error: {str(e)}")
+
 def restart_run():
     global run_start_time, victory_detected, upgrades_purchased
     
-    log.debug("Attempting to restart run")
+    log.debug("Resetting run")
     try:
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
-        for _ in range(3):
-            pydirectinput.keyDown('down')
-            time.sleep(BUTTON_DELAY/2)
-            pydirectinput.keyUp('down')
-            time.sleep(BUTTON_DELAY)
-            
-        pydirectinput.keyDown('enter')
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp('enter')
-        time.sleep(BUTTON_DELAY)
-        
-        pydirectinput.keyDown(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY/2)
-        pydirectinput.keyUp(UI_TOGGLE_KEY)
-        time.sleep(BUTTON_DELAY)
-        
         run_start_time = time.time()
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
@@ -768,7 +926,7 @@ def restart_run():
         return False
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused
+    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -781,6 +939,7 @@ def main_loop():
     last_victory_check = time.time()
     run_start_time = time.time()
     victory_detected = False
+    last_wave_number = None
     
     key_thread = KeyListenerThread()
     key_thread.start()
@@ -795,7 +954,6 @@ def main_loop():
     
     try:
         while True:
-            
             if is_running and not is_paused:
                 prevent_sleep()   
                 current_time = time.time()
@@ -804,21 +962,32 @@ def main_loop():
                     if detect_victory():
                         if victory_detected:
                             restart_run()
+                    detect_ui_elements_and_respond()
                     last_victory_check = current_time
                     
                 if current_time - last_scan > SCAN_INTERVAL:
-                    window = get_roblox_window()  # Get window without focusing
+                    window = get_roblox_window()
                     if window:
+                        wave = get_current_wave_number(last_wave=last_wave_number)
+                        last_wave_number = wave if wave is not None else last_wave_number
+
                         upgrades = scan_for_upgrades()
                         if upgrades:
-                            if focus_roblox_window():  # Only focus when we have upgrades to select
+                            if wave is not None:
+                                if wave > WAVE_THRESHOLD and wave % 10 not in [1, 6]:
+                                    if DEBUG:
+                                        log.debug(f"Skipping upgrades at wave {wave} (post-threshold non-priority wave)")
+                                    last_scan = time.time()
+                                    continue
+
+                            if focus_roblox_window():  # Only focus when upgrades are valid
                                 select_best_upgrade(upgrades)
-                                last_scan = time.time()
                             else:
-                                last_scan = time.time() + 2
+                                log.debug("Could not focus window for upgrade.")
+                            last_scan = time.time()
                         else:
                             if DEBUG:
-                                log.debug("No upgrades found, waiting...")
+                                log.debug("No upgrades found.")
                             last_scan = time.time() + 2
                     else:
                         last_scan = time.time() + 1

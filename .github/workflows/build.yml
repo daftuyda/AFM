@@ -46,7 +46,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.VERSION }}
-          release_name: AFM Endless Macro - ${{ env.VERSION }}
+          release_name: AFM Lite - ${{ env.VERSION }}
           body: |
             Release version ${{ env.VERSION }}
           draft: false
@@ -61,13 +61,3 @@ jobs:
           asset_path: AFM.zip
           asset_name: AFM.zip
           asset_content_type: application/zip
-
-      - name: Upload EXE to Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/AFM.exe
-          asset_name: AFM.exe
-          asset_content_type: application/octet-stream
