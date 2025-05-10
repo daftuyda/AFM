@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "start_key": "F6",
     "pause_key": "F7",
     "stop_key": "F8",
+    "ui_detection_enabled": False,
     "afk_prevention": True,
     "auto_start": False,
     "money_mode": False,
@@ -74,6 +75,7 @@ BUTTON_DELAY = config.get("button_delay", 0.2)
 START_KEY = config.get("start_key", "f6")
 PAUSE_KEY = config.get("pause_key", "f7")
 STOP_KEY = config.get("stop_key", "f8")
+UI_DETECTION_ENABLED = config.get("ui_detection_enabled", False)
 AFK_PREVENTION = config.get("afk_prevention", True)
 DISCORD_WEBHOOK_URL = config.get("webhook_url", "")
 DEBUG = config.get("debug", False)
@@ -296,17 +298,25 @@ def match_template_in_window(screenshot, template_name):
     template_path = get_template_path(template_name)
     template = cv2.imread(template_path)
     if template is None:
+        log.warning(f"Template not found: {template_path}")
         return 0.0, (0, 0)
-        
-    window_height = screenshot.shape[0]
-    scale_factor = window_height / 1080  # Assuming 1080p base resolution
-    new_width = int(template.shape[1] * scale_factor)
-    new_height = int(template.shape[0] * scale_factor)
-    template = cv2.resize(template, (new_width, new_height))
-    
-    res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+
+    window_height, window_width = screenshot.shape[:2]
+
+    BASE_WIDTH = 1920
+    BASE_HEIGHT = 1080
+
+    scale_w = window_width / BASE_WIDTH
+    scale_h = window_height / BASE_HEIGHT
+    scale = min(scale_w, scale_h)  # Keep proportions consistent
+
+    new_width = int(template.shape[1] * scale)
+    new_height = int(template.shape[0] * scale)
+    resized_template = cv2.resize(template, (new_width, new_height))
+
+    res = cv2.matchTemplate(screenshot, resized_template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
-    
+
     return max_val, max_loc
 
 def scan_for_upgrades(max_attempts=3):
@@ -551,6 +561,13 @@ def select_best_upgrade(upgrades):
     return False
 
 def toggle_ui_and_confirm(window=None, max_attempts=2):
+    if not UI_DETECTION_ENABLED: 
+        pydirectinput.keyDown(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.keyUp(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        return True
+    
     if not window:
         window = get_roblox_window()
         if not window:
