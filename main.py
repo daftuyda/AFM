@@ -31,22 +31,27 @@ DEFAULT_CONFIG = {
     "auto_start": False,
     "money_mode": False,
     "wave_threshold": 120,
+    "capacity_upgrades_delay": 10,
+    "max_total_cap_upgrades": 14,
+    "team_change_interval": 30,
+    "start_ult_delay": 60,
     "button_delay": 0.2,
     "high_priority": [
-        "regen",
         "boss",
-        "discount",
         "atk",
         "health",
-        "units"
-    ],
-    "low_priority": [
-        "luck",
-        "speed",
-        "heal",
-        "jade",
+        "units",
         "enemy"
     ],
+    "low_priority": [
+        "heal",
+        "speed",
+        "luck",
+        "regen",
+        "discount",
+        "jade"
+    ],
+    "multi_instance_support": False,
     "webhook_url": "",
     "debug": False
 }
@@ -84,11 +89,20 @@ LOW_PRIORITY = add_png_suffix(config.get("low_priority", DEFAULT_CONFIG["low_pri
 UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 MONEY_MODE = config.get("money_mode", False)
 WAVE_THRESHOLD = config.get("wave_threshold", 120)
+MULTI_INSTANCE = config.get("multi_instance_support", False)
+CAPACITY_UPGRADES_DELAY = config.get("capacity_upgrades_delay", 10)
+MAX_TOTAL_CAP_UPGRADES = config.get("max_total_cap_upgrades", 22)
+TEAM_CHANGE_INTERVAL = config.get("team_change_interval", 30)
+START_ULT_DELAY = config.get("start_ult_delay", 60)
 
 IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.7
 UI_TOGGLE_KEY = '\\'
 
+main_cap_upgrades_done = 0
+alt_cap_upgrades_done = 0
+main_card_upgrades = 0
+alt_card_upgrades = 0
 last_victory_time = 0
 run_start_time = 0
 victory_detected = False
@@ -142,10 +156,20 @@ class AFKPreventionThread(threading.Thread):
         while self.running:
             if is_running and not is_paused:
                 log.debug("[AFK] Simulating jump")
-                pydirectinput.keyDown('space')
-                time.sleep(0.1)
-                pydirectinput.keyUp('space')
-            time.sleep(random.randint(600, 900))  # 10 to 15 mins
+
+                def _do_jump():
+                    pydirectinput.keyDown('space')
+                    time.sleep(0.1)
+                    pydirectinput.keyUp('space')
+
+                _do_jump()
+                if MULTI_INSTANCE:
+                    alt_tab()
+                    time.sleep(0.5)
+                    _do_jump()
+                    alt_tab()
+
+            time.sleep(random.randint(600, 900))
 
     def stop(self):
         self.running = False
@@ -212,6 +236,17 @@ log = setup_logging()
 
 def get_template_path(filename):
     return os.path.join(IMAGE_FOLDER, filename) if IMAGE_FOLDER else filename
+
+def get_full_display_screenshot():
+    try:
+        with mss.mss() as sct:
+            monitor = sct.monitors[1]  # Full primary display
+            sct_img = sct.grab(monitor)
+            img = np.array(sct_img)
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    except Exception as e:
+        log.error(f"Display capture failed: {str(e)}")
+        return None
 
 def focus_roblox_window():
     try:
@@ -330,8 +365,11 @@ def scan_for_upgrades(max_attempts=3):
                 time.sleep(1)
                 attempts += 1
                 continue
-                
-            screenshot = get_window_screenshot(window)
+            
+            if MULTI_INSTANCE:
+                screenshot = get_full_display_screenshot()
+            else:
+                screenshot = get_window_screenshot(window)
             if screenshot is None:
                 attempts += 1
                 continue
@@ -868,6 +906,95 @@ def upload_to_discord(screenshot, run_time):
         log.error(f"Discord upload error: {str(e)}")
         return False
 
+def perform_cap_upgrade():
+    log.info("Performing cap upgrade")
+
+    try:
+        toggle_ui_and_confirm()
+        pydirectinput.press('down', presses=3, interval=BUTTON_DELAY)
+        pydirectinput.press('enter')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('up', presses=2, interval=BUTTON_DELAY)
+        pydirectinput.press('left')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('enter')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('down')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('enter')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+    except Exception as e: 
+        log.error(f"Cap upgrade error: {str(e)}")
+
+def change_team_to_1():
+    log.info("Changing to Team 1")
+
+    def _do_team_change():
+        toggle_ui_and_confirm()
+        pydirectinput.press('left', presses=2, interval=BUTTON_DELAY)
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('down', presses=2, interval=BUTTON_DELAY)
+        pydirectinput.press('right')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('enter')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+
+    try:
+        _do_team_change()
+        if MULTI_INSTANCE:
+            alt_tab()
+            time.sleep(0.5)
+            _do_team_change()
+            alt_tab()
+    except Exception as e:
+        log.error(f"Team change error: {str(e)}")
+
+def run_ult_loop_until_card():
+    log.info("Starting ult sequence loop")
+
+    try:
+        toggle_ui_and_confirm()
+
+        pydirectinput.press('down', presses=5, interval=BUTTON_DELAY)
+        pydirectinput.press('left')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('enter')
+        time.sleep(BUTTON_DELAY)
+    except Exception as e:
+        log.error(f"Initial UI setup for ult failed: {str(e)}")
+        return
+
+    while True:
+        try:
+            for _ in range(5):
+                pydirectinput.press('left')
+                pydirectinput.press('enter')
+                time.sleep(BUTTON_DELAY)
+
+            for _ in range(5):
+                pydirectinput.press('right')
+                pydirectinput.press('enter')
+                time.sleep(BUTTON_DELAY)
+
+            # Check if card is available to break loop
+            if scan_for_upgrades():
+                for _ in range(5):
+                    pydirectinput.press('left')
+                    pydirectinput.press('enter')
+                    time.sleep(BUTTON_DELAY)
+                pydirectinput.press(UI_TOGGLE_KEY)
+                time.sleep(BUTTON_DELAY)
+                log.info("Card detected — ending ult sequence")
+                break
+
+        except Exception as e:
+            log.error(f"Error during ult loop: {str(e)}")
+            break
+
 def detect_ui_elements_and_respond():
     try:
         window = get_roblox_window()
@@ -886,7 +1013,7 @@ def detect_ui_elements_and_respond():
 
         if settings_detected:
             log.info("Detected settings UI. Toggling UI.")
-            pydirectinput.press(UI_TOGGLE_KEY)
+            toggle_ui_and_confirm()
             time.sleep(BUTTON_DELAY)
             for _ in range(3):
                 pydirectinput.press('left')
@@ -901,12 +1028,16 @@ def detect_ui_elements_and_respond():
 
         if lobby_detected:
             log.info("Detected lobby UI. Attempting to escape.")
-            pydirectinput.press(UI_TOGGLE_KEY)
+            toggle_ui_and_confirm()
             time.sleep(BUTTON_DELAY)
-            for _ in range(6):
+            for _ in range(3):
                 pydirectinput.press('left')
                 time.sleep(BUTTON_DELAY)
             
+            pydirectinput.press('down')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('down')
+            time.sleep(BUTTON_DELAY)
             pydirectinput.press('enter')
             time.sleep(BUTTON_DELAY)
             
@@ -915,8 +1046,6 @@ def detect_ui_elements_and_respond():
             if screenshot is not None:
                 lobby_conf, _ = match_template_in_window(screenshot, "lobby.png")
                 if lobby_conf >= CONFIDENCE_THRESHOLD:
-                    pydirectinput.press('down')
-                    time.sleep(BUTTON_DELAY)
                     pydirectinput.press('right')
                     time.sleep(BUTTON_DELAY)
                     pydirectinput.press('enter')
@@ -924,15 +1053,16 @@ def detect_ui_elements_and_respond():
             pydirectinput.press(UI_TOGGLE_KEY)
             time.sleep(BUTTON_DELAY)
         
-
     except Exception as e:
         log.error(f"UI detection error: {str(e)}")
 
 def restart_run():
-    global run_start_time, victory_detected, upgrades_purchased
+    global run_start_time, victory_detected, upgrades_purchased, cap_upgrades_done, upgrades_since_last_cap
     
     log.debug("Resetting run")
     try:
+        upgrades_since_last_cap = 0
+        cap_upgrades_done = 0
         run_start_time = time.time()
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
@@ -942,8 +1072,16 @@ def restart_run():
         log.error(f"Run restart error: {str(e)}")
         return False
 
+def alt_tab():
+    pydirectinput.keyDown('alt')
+    time.sleep(0.1)
+    pydirectinput.press('tab')
+    time.sleep(0.2)
+    pydirectinput.keyUp('alt')
+    time.sleep(0.5)  # Allow window switch time
+
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number
+    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number, main_card_upgrades, alt_card_upgrades, main_cap_upgrades_done, alt_cap_upgrades_done     
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -955,6 +1093,7 @@ def main_loop():
     last_scan = time.time()
     last_victory_check = time.time()
     run_start_time = time.time()
+    last_team_change = time.time()
     victory_detected = False
     last_wave_number = None
     
@@ -974,6 +1113,11 @@ def main_loop():
             if is_running and not is_paused:
                 prevent_sleep()   
                 current_time = time.time()
+                
+                if current_time - last_team_change >= TEAM_CHANGE_INTERVAL * 60:
+                    log.info("[TeamChange] Interval reached — changing team")
+                    change_team_to_1()
+                    last_team_change = current_time
                 
                 if current_time - last_victory_check > SCAN_INTERVAL:
                     if detect_victory():
@@ -997,8 +1141,43 @@ def main_loop():
                                     last_scan = time.time()
                                     continue
 
-                            if focus_roblox_window():  # Only focus when upgrades are valid
-                                select_best_upgrade(upgrades)
+                            if focus_roblox_window():
+                                main_upgrades = scan_for_upgrades()
+                                if main_upgrades and select_best_upgrade(main_upgrades):
+                                    main_card_upgrades += 1
+                                    log.info("[Main] Upgrade successful")
+
+                                    if (
+                                        main_card_upgrades >= CAPACITY_UPGRADES_DELAY and
+                                        main_cap_upgrades_done < MAX_TOTAL_CAP_UPGRADES
+                                    ):
+                                        perform_cap_upgrade()
+                                        main_cap_upgrades_done += 1
+                                        log.info(f"[Main] Cap upgrades: {main_cap_upgrades_done}/{MAX_TOTAL_CAP_UPGRADES}")
+
+                                if MULTI_INSTANCE:
+                                    alt_tab()
+                                    time.sleep(0.5)
+
+                                    alt_upgrades = scan_for_upgrades()
+                                    if alt_upgrades and select_best_upgrade(alt_upgrades):
+                                        alt_card_upgrades += 1
+                                        log.info("[Alt] Upgrade successful")
+
+                                        if (
+                                            alt_card_upgrades >= CAPACITY_UPGRADES_DELAY and
+                                            alt_cap_upgrades_done < MAX_TOTAL_CAP_UPGRADES
+                                        ):
+                                            perform_cap_upgrade()
+                                            alt_cap_upgrades_done += 1
+                                            log.info(f"[Alt] Cap upgrades: {alt_cap_upgrades_done}/{MAX_TOTAL_CAP_UPGRADES}")
+
+                                    alt_tab()
+ 
+                                elapsed_minutes = (time.time() - run_start_time) / 60
+                                if (elapsed_minutes >= START_ULT_DELAY and
+                                        not MULTI_INSTANCE):
+                                    run_ult_loop_until_card()
                             else:
                                 log.debug("Could not focus window for upgrade.")
                             last_scan = time.time()
