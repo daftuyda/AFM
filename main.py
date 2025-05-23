@@ -31,10 +31,10 @@ DEFAULT_CONFIG = {
     "auto_start": False,
     "money_mode": False,
     "wave_threshold": 120,
-    "capacity_upgrades_delay": 10,
+    "capacity_upgrades_delay": 15,
     "max_total_cap_upgrades": 14,
-    "team_change_interval": 30,
-    "start_ult_delay": 60,
+    "team_change_interval": 90,
+    "start_ult_delay": 30,
     "button_delay": 0.2,
     "high_priority": [
         "boss",
@@ -106,6 +106,7 @@ alt_card_upgrades = 0
 last_victory_time = 0
 run_start_time = 0
 victory_detected = False
+ult_sequence_started = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
@@ -919,8 +920,11 @@ def perform_cap_upgrade():
         time.sleep(BUTTON_DELAY)
         pydirectinput.press('enter')
         time.sleep(BUTTON_DELAY)
-        pydirectinput.press('down')
+        pydirectinput.press(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
+        pydirectinput.press(UI_TOGGLE_KEY)
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('down', presses=3, interval=BUTTON_DELAY)
         pydirectinput.press('enter')
         time.sleep(BUTTON_DELAY)
         pydirectinput.press(UI_TOGGLE_KEY)
@@ -1057,8 +1061,10 @@ def detect_ui_elements_and_respond():
         log.error(f"UI detection error: {str(e)}")
 
 def restart_run():
-    global run_start_time, victory_detected, upgrades_purchased, cap_upgrades_done, upgrades_since_last_cap
-    
+    global run_start_time, victory_detected, upgrades_purchased
+    global cap_upgrades_done, upgrades_since_last_cap
+    global ult_sequence_started
+
     log.debug("Resetting run")
     try:
         upgrades_since_last_cap = 0
@@ -1066,8 +1072,8 @@ def restart_run():
         run_start_time = time.time()
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
+        ult_sequence_started = False  # <-- Reset ult sequence flag
         return True
-        
     except Exception as e:
         log.error(f"Run restart error: {str(e)}")
         return False
@@ -1076,7 +1082,7 @@ def alt_tab():
     pydirectinput.keyDown('alt')
     time.sleep(0.1)
     pydirectinput.press('tab')
-    time.sleep(0.2)
+    time.sleep(0.1)
     pydirectinput.keyUp('alt')
     time.sleep(0.5)  # Allow window switch time
 
@@ -1176,8 +1182,10 @@ def main_loop():
  
                                 elapsed_minutes = (time.time() - run_start_time) / 60
                                 if (elapsed_minutes >= START_ULT_DELAY and
-                                        not MULTI_INSTANCE):
+                                        not MULTI_INSTANCE and
+                                        not ult_sequence_started):
                                     run_ult_loop_until_card()
+                                    ult_sequence_started = True
                             else:
                                 log.debug("Could not focus window for upgrade.")
                             last_scan = time.time()
