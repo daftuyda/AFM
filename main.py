@@ -1098,6 +1098,9 @@ def detect_ui_elements_and_respond():
         screenshot = get_window_screenshot(window)
         if screenshot is None:
             return
+        
+        buffs_conf, _ = match_template_in_window(screenshot, "buffs.png")
+        buffs_detected = buffs_conf >= CONFIDENCE_THRESHOLD
 
         settings_conf, _ = match_template_in_window(screenshot, "settings.png")
         settings_detected = settings_conf >= CONFIDENCE_THRESHOLD
@@ -1105,14 +1108,29 @@ def detect_ui_elements_and_respond():
         lobby_conf, _ = match_template_in_window(screenshot, "lobby.png")
         lobby_detected = lobby_conf >= CONFIDENCE_THRESHOLD
 
+        if buffs_detected:
+            log.info("Detected settings UI. Toggling UI.")
+            toggle_ui_and_confirm()
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('down')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('left')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+
         if settings_detected:
             log.info("Detected settings UI. Toggling UI.")
             toggle_ui_and_confirm()
             time.sleep(BUTTON_DELAY)
-            for _ in range(3):
-                pydirectinput.press('left')
-                time.sleep(BUTTON_DELAY)
-            
+            pydirectinput.press('left')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('left')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('left')
+            time.sleep(BUTTON_DELAY)
             pydirectinput.press('up')
             time.sleep(BUTTON_DELAY)
             pydirectinput.press('enter')
@@ -1153,14 +1171,23 @@ def detect_ui_elements_and_respond():
 def restart_run():
     global run_start_time, victory_detected, upgrades_purchased
     global cap_upgrades_done, upgrades_since_last_cap
+    global main_card_upgrades, main_cap_upgrades_done
+    global alt_card_upgrades, alt_cap_upgrades_done
 
     log.debug("Resetting run")
     try:
-        upgrades_since_last_cap = 0
-        cap_upgrades_done = 0
         run_start_time = time.time()
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
+
+        # Reset all cap tracking
+        cap_upgrades_done = 0
+        upgrades_since_last_cap = 0
+        main_card_upgrades = 0
+        main_cap_upgrades_done = 0
+        alt_card_upgrades = 0
+        alt_cap_upgrades_done = 0
+
         return True
     except Exception as e:
         log.error(f"Run restart error: {str(e)}")
