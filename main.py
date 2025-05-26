@@ -776,6 +776,40 @@ def record_upgrade_purchase(upgrade_name, rarity):
     if DEBUG:
         log.debug(f"Recorded purchase: {upgrade_name} ({rarity})")
 
+def red_bar_present():
+    try:
+        window = get_roblox_window()
+        if not window:
+            return False
+
+        screenshot = get_window_screenshot(window)
+        if screenshot is None:
+            return False
+
+        h, w = screenshot.shape[:2]
+        x_start = int(w * 0.45)
+        y_start = int(h * 0.11)
+        x_end = int(w * 0.55)
+        y_end = int(h * 0.1)
+
+        x_start = max(0, min(w - 1, x_start))
+        x_end   = max(x_start + 1, min(w, x_end))
+        y_start = max(0, min(h - 1, y_start))
+        y_end   = max(y_start + 1, min(h, y_end))
+
+        bar_region = screenshot[y_start:y_end, x_start:x_end]
+        avg_color = np.mean(bar_region, axis=(0, 1))  # BGR
+        b, g, r = avg_color.astype(int)
+
+        if DEBUG:
+            log.debug(f"[ULT] Avg RGB: R={r}, G={g}, B={b}")
+
+        return r > 150 and r > g + 50 and r > b + 50
+
+    except Exception as e:
+        log.error(f"[ULT] Red bar detection error: {str(e)}")
+        return False
+
 def detect_victory():
     global last_victory_time, victory_detected, run_start_time
     
@@ -915,8 +949,13 @@ def perform_cap_upgrade():
         pydirectinput.press('down', presses=3, interval=BUTTON_DELAY)
         pydirectinput.press('enter')
         time.sleep(BUTTON_DELAY)
-        pydirectinput.press('up', presses=2, interval=BUTTON_DELAY)
-        pydirectinput.press('left')
+        pydirectinput.press('up', presses=3, interval=BUTTON_DELAY)
+        pydirectinput.press('left', presses=2, interval=BUTTON_DELAY)
+        pydirectinput.press('down')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('right')
+        time.sleep(BUTTON_DELAY)
+        pydirectinput.press('up')
         time.sleep(BUTTON_DELAY)
         pydirectinput.press('enter')
         time.sleep(BUTTON_DELAY)
@@ -962,7 +1001,6 @@ def run_ult_loop_until_card():
 
     try:
         toggle_ui_and_confirm()
-
         pydirectinput.press('down', presses=5, interval=BUTTON_DELAY)
         pydirectinput.press('left')
         time.sleep(BUTTON_DELAY)
@@ -972,33 +1010,74 @@ def run_ult_loop_until_card():
         log.error(f"Initial UI setup for ult failed: {str(e)}")
         return
 
+    cooldown_until = 0
+    red_bar_last_seen = False
+
     while True:
         try:
+            # Always check for victory
+            if detect_victory():
+                log.info("[ULT] Victory detected — exiting ult loop.")
+                pydirectinput.press(UI_TOGGLE_KEY)
+                time.sleep(BUTTON_DELAY)
+                break
+
+            # Cooldown check
+            if time.time() < cooldown_until:
+                time.sleep(1)
+                continue
+
+            # Red bar detection logic
+            if red_bar_present():
+                if not red_bar_last_seen:
+                    log.info("[ULT] Red enemy HP bar detected — pausing ult input for 60s")
+                    cooldown_until = time.time() + 60
+                red_bar_last_seen = True
+                continue
+            else:
+                red_bar_last_seen = False
+
+            # LEFT x5
             for _ in range(5):
                 pydirectinput.press('left')
                 pydirectinput.press('enter')
                 time.sleep(BUTTON_DELAY)
 
+                if detect_victory():
+                    log.info("[ULT] Victory detected — exiting ult loop.")
+                    pydirectinput.press(UI_TOGGLE_KEY)
+                    time.sleep(BUTTON_DELAY)
+                    return
+
+            # Card check only after LEFT movement
+            if scan_for_upgrades():
+                pydirectinput.press(UI_TOGGLE_KEY)
+                time.sleep(BUTTON_DELAY)
+                log.info("[ULT] Card detected — ending ult sequence")
+                break
+
+            # RIGHT x5
             for _ in range(5):
                 pydirectinput.press('right')
                 pydirectinput.press('enter')
                 time.sleep(BUTTON_DELAY)
 
-            # Check if card is available to break loop
-            if scan_for_upgrades():
-                for _ in range(5):
-                    pydirectinput.press('left')
-                    pydirectinput.press('enter')
+                if detect_victory():
+                    log.info("[ULT] Victory detected — exiting ult loop.")
+                    pydirectinput.press(UI_TOGGLE_KEY)
                     time.sleep(BUTTON_DELAY)
-                pydirectinput.press(UI_TOGGLE_KEY)
-                time.sleep(BUTTON_DELAY)
-                log.info("Card detected — ending ult sequence")
-                break
+                    return
+
+            # Special condition: allow loop to continue if wave 1 or 6
+            wave = get_current_wave_number()
+            if wave is not None and wave in (1, 6) and wave >= WAVE_THRESHOLD:
+                log.info(f"[ULT] Wave {wave} — continuing ult despite card hold")
+                continue
 
         except Exception as e:
             log.error(f"Error during ult loop: {str(e)}")
-            break
-
+            break 
+        
 def detect_ui_elements_and_respond():
     try:
         window = get_roblox_window()
@@ -1063,7 +1142,6 @@ def detect_ui_elements_and_respond():
 def restart_run():
     global run_start_time, victory_detected, upgrades_purchased
     global cap_upgrades_done, upgrades_since_last_cap
-    global ult_sequence_started
 
     log.debug("Resetting run")
     try:
@@ -1072,7 +1150,6 @@ def restart_run():
         run_start_time = time.time()
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
-        ult_sequence_started = False  # <-- Reset ult sequence flag
         return True
     except Exception as e:
         log.error(f"Run restart error: {str(e)}")
@@ -1087,7 +1164,7 @@ def alt_tab():
     time.sleep(0.5)  # Allow window switch time
 
 def main_loop():
-    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number, main_card_upgrades, alt_card_upgrades, main_cap_upgrades_done, alt_cap_upgrades_done     
+    global run_start_time, victory_detected, is_running, is_paused, upgrade_allowed, last_wave_number, main_card_upgrades, alt_card_upgrades, main_cap_upgrades_done, alt_cap_upgrades_done, cap_upgrades_done 
     
     log.info("=== AFK Endless Macro ===")
     log.info(f"Press {START_KEY} to begin." if not AUTO_START else "Auto-start: Enabled.")
@@ -1181,11 +1258,10 @@ def main_loop():
                                     alt_tab()
  
                                 elapsed_minutes = (time.time() - run_start_time) / 60
-                                if (elapsed_minutes >= START_ULT_DELAY and
-                                        not MULTI_INSTANCE and
-                                        not ult_sequence_started):
-                                    run_ult_loop_until_card()
-                                    ult_sequence_started = True
+
+                                # if elapsed_minutes >= START_ULT_DELAY and not MULTI_INSTANCE:
+                                #     log.info("[ULT] Delay reached — entering ult sequence loop")
+                                #     run_ult_loop_until_card()
                             else:
                                 log.debug("Could not focus window for upgrade.")
                             last_scan = time.time()
