@@ -32,9 +32,9 @@ DEFAULT_CONFIG = {
     "money_mode": False,
     "wave_threshold": 120,
     "capacity_upgrades_delay": 15,
-    "max_total_cap_upgrades": 14,
-    "team_change_interval": 90,
-    "start_ult_delay": 30,
+    "max_total_cap_upgrades": 17,
+    "team_change_interval": 60,
+    "enable_ult_clicker": True,
     "button_delay": 0.2,
     "high_priority": [
         "boss",
@@ -90,10 +90,10 @@ UPGRADE_PRIORITY = HIGH_PRIORITY + LOW_PRIORITY
 MONEY_MODE = config.get("money_mode", False)
 WAVE_THRESHOLD = config.get("wave_threshold", 120)
 MULTI_INSTANCE = config.get("multi_instance_support", False)
-CAPACITY_UPGRADES_DELAY = config.get("capacity_upgrades_delay", 10)
-MAX_TOTAL_CAP_UPGRADES = config.get("max_total_cap_upgrades", 22)
-TEAM_CHANGE_INTERVAL = config.get("team_change_interval", 30)
-START_ULT_DELAY = config.get("start_ult_delay", 60)
+CAPACITY_UPGRADES_DELAY = config.get("capacity_upgrades_delay", 15)
+MAX_TOTAL_CAP_UPGRADES = config.get("max_total_cap_upgrades", 17)
+TEAM_CHANGE_INTERVAL = config.get("team_change_interval", 60)
+ENABLE_ULT_CLICKER = config.get("enable_ult_clicker", True)
 
 IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.7
@@ -106,7 +106,6 @@ alt_card_upgrades = 0
 last_victory_time = 0
 run_start_time = 0
 victory_detected = False
-ult_sequence_started = False
 upgrades_purchased = defaultdict(lambda: defaultdict(int))
 is_running = False
 is_paused = False
@@ -215,6 +214,44 @@ class KeyListenerThread(threading.Thread):
         self.running = False
         log.info("[Keybind] Script stopped")
         os._exit(0)
+
+class UltClickerThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = True
+    
+    @staticmethod
+    def rdp_safe_click(x, y):
+        ctypes.windll.user32.SetCursorPos(x, y)
+        time.sleep(0.02)  # tiny delay to settle
+        ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0)  # left down
+        ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0)  # left up
+
+    def run(self):
+        while self.running:
+            region = detect_yellow_border_region()
+            if region:
+                x, y, w, h = region
+
+                # Skip invalid or too-small regions
+                if w < 5 or h < 5:
+                    log.warning("[ULT-CLICK] Detected yellow region too small to click safely")
+                    time.sleep(1)
+                    continue
+
+                # Safe bounds for random point
+                click_x = x + np.random.randint(int(w * 0.2), int(w * 0.8))
+                click_y = y + np.random.randint(int(h * 0.2), int(h * 0.8))
+
+                log.info(f"[ULT-CLICK] Clicking yellow ult at ({click_x}, {click_y})")
+                self.rdp_safe_click(click_x, click_y)
+
+                time.sleep(1.5)  # Short cooldown to avoid rapid spam
+            else:
+                time.sleep(0.5)
+    
+    def stop(self):
+        self.running = False
 
 def setup_logging():
     with open('afm_macro.log', 'w'):
@@ -996,87 +1033,61 @@ def change_team_to_1():
     except Exception as e:
         log.error(f"Team change error: {str(e)}")
 
-def run_ult_loop_until_card():
-    log.info("Starting ult sequence loop")
+def detect_yellow_border_region(
+    debug=True,
+    y_start_ratio=0.85,
+    y_end_ratio=0.97,
+    x_start_ratio=0.3,
+    x_end_ratio=0.7
+):
+    window = get_roblox_window()
+    if not window:
+        return None
 
-    try:
-        toggle_ui_and_confirm()
-        pydirectinput.press('down', presses=5, interval=BUTTON_DELAY)
-        pydirectinput.press('left')
-        time.sleep(BUTTON_DELAY)
-        pydirectinput.press('enter')
-        time.sleep(BUTTON_DELAY)
-    except Exception as e:
-        log.error(f"Initial UI setup for ult failed: {str(e)}")
-        return
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return None
 
-    cooldown_until = 0
-    red_bar_last_seen = False
+    h, w = screenshot.shape[:2]
 
-    while True:
-        try:
-            # Always check for victory
-            if detect_victory():
-                log.info("[ULT] Victory detected — exiting ult loop.")
-                pydirectinput.press(UI_TOGGLE_KEY)
-                time.sleep(BUTTON_DELAY)
-                break
+    # Calculate scan region
+    x_start = int(w * x_start_ratio)
+    x_end   = int(w * x_end_ratio)
+    y_start = int(h * y_start_ratio)
+    y_end   = int(h * y_end_ratio)
 
-            # Cooldown check
-            if time.time() < cooldown_until:
-                time.sleep(1)
-                continue
+    # Extract ROI
+    roi = screenshot[y_start:y_end, x_start:x_end]
 
-            # Red bar detection logic
-            if red_bar_present():
-                if not red_bar_last_seen:
-                    log.info("[ULT] Red enemy HP bar detected — pausing ult input for 60s")
-                    cooldown_until = time.time() + 60
-                red_bar_last_seen = True
-                continue
-            else:
-                red_bar_last_seen = False
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    lower_yellow = np.array([25, 200, 200])
+    upper_yellow = np.array([35, 255, 255])
+    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
-            # LEFT x5
-            for _ in range(5):
-                pydirectinput.press('left')
-                pydirectinput.press('enter')
-                time.sleep(BUTTON_DELAY)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                if detect_victory():
-                    log.info("[ULT] Victory detected — exiting ult loop.")
-                    pydirectinput.press(UI_TOGGLE_KEY)
-                    time.sleep(BUTTON_DELAY)
-                    return
+    if debug:
+        debug_img = screenshot.copy()
 
-            # Card check only after LEFT movement
-            if scan_for_upgrades():
-                pydirectinput.press(UI_TOGGLE_KEY)
-                time.sleep(BUTTON_DELAY)
-                log.info("[ULT] Card detected — ending ult sequence")
-                break
+        # Draw the scanning region in cyan
+        cv2.rectangle(debug_img, (x_start, y_start), (x_end, y_end), (255, 255, 0), 2)
 
-            # RIGHT x5
-            for _ in range(5):
-                pydirectinput.press('right')
-                pydirectinput.press('enter')
-                time.sleep(BUTTON_DELAY)
+        # Draw detected contours in yellow (offset to full screen coords)
+        for cnt in contours:
+            cx, cy, cw, ch = cv2.boundingRect(cnt)
+            abs_x = cx + x_start
+            abs_y = cy + y_start
+            cv2.rectangle(debug_img, (abs_x, abs_y), (abs_x + cw, abs_y + ch), (0, 255, 255), 2)
 
-                if detect_victory():
-                    log.info("[ULT] Victory detected — exiting ult loop.")
-                    pydirectinput.press(UI_TOGGLE_KEY)
-                    time.sleep(BUTTON_DELAY)
-                    return
+        cv2.imwrite("debug_yellow_scan.png", debug_img)
+        log.info("[DEBUG] Saved yellow scan visualization to debug_yellow_scan.png")
 
-            # Special condition: allow loop to continue if wave 1 or 6
-            wave = get_current_wave_number()
-            if wave is not None and wave in (1, 6) and wave >= WAVE_THRESHOLD:
-                log.info(f"[ULT] Wave {wave} — continuing ult despite card hold")
-                continue
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        cx, cy, cw, ch = cv2.boundingRect(largest)
+        return (cx + x_start, cy + y_start, cw, ch)
 
-        except Exception as e:
-            log.error(f"Error during ult loop: {str(e)}")
-            break 
+    return None
         
 def detect_ui_elements_and_respond():
     try:
@@ -1183,6 +1194,14 @@ def main_loop():
     key_thread = KeyListenerThread()
     key_thread.start()
     
+    ult_clicker = None
+    if ENABLE_ULT_CLICKER:
+        ult_clicker = UltClickerThread()
+        ult_clicker.start()
+        log.info("[ULT-CLICK] Ult clicker thread started")
+    else:
+        log.info("[ULT-CLICK] Ult clicker thread disabled via config")
+    
     if AUTO_START:
         is_running = True
     
@@ -1256,12 +1275,6 @@ def main_loop():
                                             log.info(f"[Alt] Cap upgrades: {alt_cap_upgrades_done}/{MAX_TOTAL_CAP_UPGRADES}")
 
                                     alt_tab()
- 
-                                elapsed_minutes = (time.time() - run_start_time) / 60
-
-                                # if elapsed_minutes >= START_ULT_DELAY and not MULTI_INSTANCE:
-                                #     log.info("[ULT] Delay reached — entering ult sequence loop")
-                                #     run_ult_loop_until_card()
                             else:
                                 log.debug("Could not focus window for upgrade.")
                             last_scan = time.time()
@@ -1289,6 +1302,10 @@ def main_loop():
         if afk_thread:
             afk_thread.stop()
             afk_thread.join(timeout=2)
+            
+        if ult_clicker:
+            ult_clicker.stop()
+            ult_clicker.join(timeout=2)
         
         allow_sleep()
 
