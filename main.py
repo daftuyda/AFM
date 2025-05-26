@@ -1034,7 +1034,7 @@ def change_team_to_1():
         log.error(f"Team change error: {str(e)}")
 
 def detect_yellow_border_region(
-    debug=True,
+    debug=False,
     y_start_ratio=0.85,
     y_end_ratio=0.97,
     x_start_ratio=0.3,
