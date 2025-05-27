@@ -146,6 +146,33 @@ else:
     def allow_sleep():
         pass
 
+PUL = ctypes.POINTER(ctypes.c_ulong)
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", PUL)]
+
+class Input_I(ctypes.Union):
+    _fields_ = [("mi", MouseInput)]
+
+class Input(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong),
+                ("ii", Input_I)]
+
+# Mouse event flags
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+# Screen size (for absolute movement)
+screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+
 class AFKPreventionThread(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
@@ -222,31 +249,44 @@ class UltClickerThread(threading.Thread):
     
     @staticmethod
     def rdp_safe_click(x, y):
-        ctypes.windll.user32.SetCursorPos(x, y)
-        time.sleep(0.02)  # tiny delay to settle
-        ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0)  # left down
-        ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0)  # left up
+        abs_x = int(x * 65535 / screen_w)
+        abs_y = int(y * 65535 / screen_h)
+
+        inputs = (Input * 3)()
+
+        inputs[0].type = 0
+        inputs[0].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, None)
+
+        inputs[1].type = 0
+        inputs[1].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, 0, None)
+
+        inputs[2].type = 0
+        inputs[2].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, 0, None)
+
+        ctypes.windll.user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(inputs[0]))
+        time.sleep(0.02)
 
     def run(self):
         while self.running:
+            if globals().get("is_paused", False):
+                time.sleep(0.5)
+                continue
+
             region = detect_yellow_border_region()
             if region:
                 x, y, w, h = region
 
-                # Skip invalid or too-small regions
                 if w < 5 or h < 5:
-                    log.warning("[ULT-CLICK] Detected yellow region too small to click safely")
+                    log.warning("[ULT-CLICK] Yellow region too small to click")
                     time.sleep(1)
                     continue
 
-                # Safe bounds for random point
                 click_x = x + np.random.randint(int(w * 0.2), int(w * 0.8))
                 click_y = y + np.random.randint(int(h * 0.2), int(h * 0.8))
 
                 log.info(f"[ULT-CLICK] Clicking yellow ult at ({click_x}, {click_y})")
                 self.rdp_safe_click(click_x, click_y)
-
-                time.sleep(1.5)  # Short cooldown to avoid rapid spam
+                time.sleep(1.5)
             else:
                 time.sleep(0.5)
     
@@ -1034,7 +1074,6 @@ def change_team_to_1():
         log.error(f"Team change error: {str(e)}")
 
 def detect_yellow_border_region(
-    debug=False,
     y_start_ratio=0.85,
     y_end_ratio=0.97,
     x_start_ratio=0.3,
@@ -1050,13 +1089,11 @@ def detect_yellow_border_region(
 
     h, w = screenshot.shape[:2]
 
-    # Calculate scan region
     x_start = int(w * x_start_ratio)
     x_end   = int(w * x_end_ratio)
     y_start = int(h * y_start_ratio)
     y_end   = int(h * y_end_ratio)
 
-    # Extract ROI
     roi = screenshot[y_start:y_end, x_start:x_end]
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -1065,22 +1102,6 @@ def detect_yellow_border_region(
     mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if debug:
-        debug_img = screenshot.copy()
-
-        # Draw the scanning region in cyan
-        cv2.rectangle(debug_img, (x_start, y_start), (x_end, y_end), (255, 255, 0), 2)
-
-        # Draw detected contours in yellow (offset to full screen coords)
-        for cnt in contours:
-            cx, cy, cw, ch = cv2.boundingRect(cnt)
-            abs_x = cx + x_start
-            abs_y = cy + y_start
-            cv2.rectangle(debug_img, (abs_x, abs_y), (abs_x + cw, abs_y + ch), (0, 255, 255), 2)
-
-        cv2.imwrite("debug_yellow_scan.png", debug_img)
-        log.info("[DEBUG] Saved yellow scan visualization to debug_yellow_scan.png")
 
     if contours:
         largest = max(contours, key=cv2.contourArea)
@@ -1180,7 +1201,6 @@ def restart_run():
         victory_detected = False
         upgrades_purchased = defaultdict(lambda: defaultdict(int))
 
-        # Reset all cap tracking
         cap_upgrades_done = 0
         upgrades_since_last_cap = 0
         main_card_upgrades = 0
