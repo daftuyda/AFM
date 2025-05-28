@@ -281,8 +281,8 @@ class UltClickerThread(threading.Thread):
                     time.sleep(1)
                     continue
 
-                click_x = x + np.random.randint(int(w * 0.2), int(w * 0.8))
-                click_y = y + np.random.randint(int(h * 0.2), int(h * 0.8))
+                click_x = x + max(0, min(w - 1, w // 2))
+                click_y = y + max(0, min(h - 1, h // 2))
 
                 log.info(f"[ULT-CLICK] Clicking yellow ult at ({click_x}, {click_y})")
                 self.rdp_safe_click(click_x, click_y)
@@ -1036,6 +1036,8 @@ def perform_cap_upgrade():
         time.sleep(BUTTON_DELAY)
         pydirectinput.press('enter')
         time.sleep(BUTTON_DELAY)
+
+        # Attempt to close UI
         pydirectinput.press(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
         pydirectinput.press(UI_TOGGLE_KEY)
@@ -1045,8 +1047,35 @@ def perform_cap_upgrade():
         time.sleep(BUTTON_DELAY)
         pydirectinput.press(UI_TOGGLE_KEY)
         time.sleep(BUTTON_DELAY)
-    except Exception as e: 
+
+        # Confirm UI is closed
+        if ui_still_open():
+            log.warning("[CAP] UI still open — attempting fallback close sequence")
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press('down', presses=3, interval=BUTTON_DELAY)
+            pydirectinput.press('enter')
+            time.sleep(BUTTON_DELAY)
+            pydirectinput.press(UI_TOGGLE_KEY)
+            time.sleep(BUTTON_DELAY)
+
+    except Exception as e:
         log.error(f"Cap upgrade error: {str(e)}")
+
+def ui_still_open():
+    window = get_roblox_window()
+    if not window:
+        return False
+
+    screenshot = get_window_screenshot(window)
+    if screenshot is None:
+        return False
+
+    confidence, _ = match_template_in_window(screenshot, "capacity.png")
+    if DEBUG:
+        log.debug(f"[UI CHECK] UI box confidence: {confidence:.2f}")
+
+    return confidence >= 0.75
 
 def change_team_to_1():
     log.info("Changing to Team 1")
@@ -1076,8 +1105,8 @@ def change_team_to_1():
 def detect_yellow_border_region(
     y_start_ratio=0.85,
     y_end_ratio=0.97,
-    x_start_ratio=0.3,
-    x_end_ratio=0.7
+    x_start_ratio=0.32,
+    x_end_ratio=0.68
 ):
     window = get_roblox_window()
     if not window:
@@ -1088,7 +1117,12 @@ def detect_yellow_border_region(
         return None
 
     h, w = screenshot.shape[:2]
-
+    aspect_ratio = w / h
+    
+    if aspect_ratio >= 2.2:
+        x_start_ratio = 0.36
+        x_end_ratio = 0.64
+            
     x_start = int(w * x_start_ratio)
     x_end   = int(w * x_end_ratio)
     y_start = int(h * y_start_ratio)
@@ -1108,7 +1142,7 @@ def detect_yellow_border_region(
         cx, cy, cw, ch = cv2.boundingRect(largest)
         return (cx + x_start, cy + y_start, cw, ch)
 
-    return None
+    return None 
         
 def detect_ui_elements_and_respond():
     try:
