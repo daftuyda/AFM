@@ -34,7 +34,6 @@ DEFAULT_CONFIG = {
     "capacity_upgrades_delay": 15,
     "max_total_cap_upgrades": 17,
     "team_change_interval": 60,
-    "enable_ult_clicker": True,
     "button_delay": 0.2,
     "high_priority": [
         "boss",
@@ -93,7 +92,6 @@ MULTI_INSTANCE = config.get("multi_instance_support", False)
 CAPACITY_UPGRADES_DELAY = config.get("capacity_upgrades_delay", 15)
 MAX_TOTAL_CAP_UPGRADES = config.get("max_total_cap_upgrades", 17)
 TEAM_CHANGE_INTERVAL = config.get("team_change_interval", 60)
-ENABLE_ULT_CLICKER = config.get("enable_ult_clicker", True)
 
 IMAGE_FOLDER = "images"
 CONFIDENCE_THRESHOLD = 0.7
@@ -146,32 +144,6 @@ else:
     def allow_sleep():
         pass
 
-PUL = ctypes.POINTER(ctypes.c_ulong)
-
-class MouseInput(ctypes.Structure):
-    _fields_ = [("dx", ctypes.c_long),
-                ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", PUL)]
-
-class Input_I(ctypes.Union):
-    _fields_ = [("mi", MouseInput)]
-
-class Input(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong),
-                ("ii", Input_I)]
-
-# Mouse event flags
-MOUSEEVENTF_MOVE = 0x0001
-MOUSEEVENTF_LEFTDOWN = 0x0002
-MOUSEEVENTF_LEFTUP = 0x0004
-MOUSEEVENTF_ABSOLUTE = 0x8000
-
-# Screen size (for absolute movement)
-screen_w = ctypes.windll.user32.GetSystemMetrics(0)
-screen_h = ctypes.windll.user32.GetSystemMetrics(1)
 
 class AFKPreventionThread(threading.Thread):
     def __init__(self):
@@ -242,56 +214,6 @@ class KeyListenerThread(threading.Thread):
         log.info("[Keybind] Script stopped")
         os._exit(0)
 
-class UltClickerThread(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.running = True
-    
-    @staticmethod
-    def rdp_safe_click(x, y):
-        abs_x = int(x * 65535 / screen_w)
-        abs_y = int(y * 65535 / screen_h)
-
-        inputs = (Input * 3)()
-
-        inputs[0].type = 0
-        inputs[0].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, None)
-
-        inputs[1].type = 0
-        inputs[1].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, 0, None)
-
-        inputs[2].type = 0
-        inputs[2].ii.mi = MouseInput(abs_x, abs_y, 0, MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, 0, None)
-
-        ctypes.windll.user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(inputs[0]))
-        time.sleep(0.02)
-
-    def run(self):
-        while self.running:
-            if globals().get("is_paused", False):
-                time.sleep(0.5)
-                continue
-
-            region = detect_yellow_border_region()
-            if region:
-                x, y, w, h = region
-
-                if w < 5 or h < 5:
-                    log.warning("[ULT-CLICK] Yellow region too small to click")
-                    time.sleep(1)
-                    continue
-
-                click_x = x + max(0, min(w - 1, w // 2))
-                click_y = y + max(0, min(h - 1, h // 2))
-
-                log.info(f"[ULT-CLICK] Clicking yellow ult at ({click_x}, {click_y})")
-                self.rdp_safe_click(click_x, click_y)
-                time.sleep(1.5)
-            else:
-                time.sleep(0.5)
-    
-    def stop(self):
-        self.running = False
 
 def setup_logging():
     with open('afm_macro.log', 'w'):
@@ -1102,48 +1024,6 @@ def change_team_to_1():
     except Exception as e:
         log.error(f"Team change error: {str(e)}")
 
-def detect_yellow_border_region(
-    y_start_ratio=0.85,
-    y_end_ratio=0.97,
-    x_start_ratio=0.32,
-    x_end_ratio=0.68
-):
-    window = get_roblox_window()
-    if not window:
-        return None
-
-    screenshot = get_window_screenshot(window)
-    if screenshot is None:
-        return None
-
-    h, w = screenshot.shape[:2]
-    aspect_ratio = w / h
-    
-    if aspect_ratio >= 2.2:
-        x_start_ratio = 0.36
-        x_end_ratio = 0.64
-            
-    x_start = int(w * x_start_ratio)
-    x_end   = int(w * x_end_ratio)
-    y_start = int(h * y_start_ratio)
-    y_end   = int(h * y_end_ratio)
-
-    roi = screenshot[y_start:y_end, x_start:x_end]
-
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    lower_yellow = np.array([25, 200, 200])
-    upper_yellow = np.array([35, 255, 255])
-    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        cx, cy, cw, ch = cv2.boundingRect(largest)
-        return (cx + x_start, cy + y_start, cw, ch)
-
-    return None 
-        
 def detect_ui_elements_and_respond():
     try:
         window = get_roblox_window()
@@ -1275,13 +1155,6 @@ def main_loop():
     key_thread = KeyListenerThread()
     key_thread.start()
     
-    ult_clicker = None
-    if ENABLE_ULT_CLICKER:
-        ult_clicker = UltClickerThread()
-        ult_clicker.start()
-        log.info("[ULT-CLICK] Ult clicker thread started")
-    else:
-        log.info("[ULT-CLICK] Ult clicker thread disabled via config")
     
     if AUTO_START:
         is_running = True
@@ -1384,9 +1257,6 @@ def main_loop():
             afk_thread.stop()
             afk_thread.join(timeout=2)
             
-        if ult_clicker:
-            ult_clicker.stop()
-            ult_clicker.join(timeout=2)
         
         allow_sleep()
 
